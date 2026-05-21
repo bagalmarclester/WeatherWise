@@ -10,7 +10,6 @@ import {
 } from 'react-native';
 import { Text, Divider } from 'react-native-paper';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import Constants from 'expo-constants';
 
 interface LocationSearchResult {
   display_name: string;
@@ -29,20 +28,8 @@ interface LocationSearchInputProps {
 }
 
 const DEBOUNCE_MS = 300;
-const PROXY_PORT = 3001;
-
-/**
- * Gets the proxy server URL by extracting the dev machine's IP
- * from Expo's hostUri (which the phone already uses to connect to Metro).
- */
-const getProxyBaseUrl = (): string => {
-  const hostUri = Constants.expoConfig?.hostUri ?? Constants.manifest?.debuggerHost;
-  if (hostUri) {
-    const host = hostUri.split(':')[0];
-    return `http://${host}:${PROXY_PORT}`;
-  }
-  return `http://localhost:${PROXY_PORT}`;
-};
+const NOMINATIM_BASE_URL = 'https://nominatim.openstreetmap.org';
+const USER_AGENT = 'WeatherWiseApp/1.0 (tester@um.edu.ph)';
 
 /** Stable separator — extracted outside render to avoid re-creating on every frame */
 const ItemSeparator = () => <Divider style={styles.divider} />;
@@ -100,11 +87,13 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
 
     setLoading(true);
 
-    const proxyBase = getProxyBaseUrl();
-    const url = `${proxyBase}/geocode/search?q=${encodeURIComponent(trimmed)}`;
+    const url = `${NOMINATIM_BASE_URL}/search?q=${encodeURIComponent(trimmed)}&format=json&limit=5&countrycodes=ph`;
 
     try {
-      const response = await fetch(url, { signal: controller.signal });
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { 'User-Agent': USER_AGENT },
+      });
 
       if (!response.ok) throw new Error('Search failed');
       const data: LocationSearchResult[] = await response.json();

@@ -1,5 +1,5 @@
-import Constants from 'expo-constants';
-import { fetchWithTimeout } from '../utils/fetch';
+import axios from 'axios';
+import { Platform } from 'react-native';
 
 export interface Location {
   lat: number;
@@ -18,25 +18,15 @@ export interface RouteResponse {
   legs: RouteLeg[];
 }
 
-const PROXY_PORT = 3001;
+// Route through localhost proxy on web (dev only), direct to OSRM on mobile
+const OSRM_BASE_URL =
+  Platform.OS === 'web'
+    ? 'http://localhost:3000/osrm'
+    : 'https://router.project-osrm.org';
 
 /**
- * Gets the proxy server URL by extracting the dev machine's IP
- * from Expo's hostUri (which the phone already uses to connect to Metro).
- */
-const getProxyBaseUrl = (): string => {
-  const hostUri = Constants.expoConfig?.hostUri ?? Constants.manifest?.debuggerHost;
-  if (hostUri) {
-    const host = hostUri.split(':')[0]; // Extract IP, drop Metro port
-    return `http://${host}:${PROXY_PORT}`;
-  }
-  // Fallback for development — unlikely to be needed
-  return `http://localhost:${PROXY_PORT}`;
-};
-
-/**
- * Fetches alternative driving routes via the local proxy server.
- * 
+ * Fetches alternative driving routes directly from the OSRM public API.
+ *
  * @param origin - Starting coordinates { lat, lon }
  * @param destination - Ending coordinates { lat, lon }
  * @returns Array of parsed alternative route data
@@ -50,21 +40,13 @@ export const fetchAlternativeRoutes = async (
   const lon2 = Number(destination.lon);
   const lat2 = Number(destination.lat);
 
-  const proxyBase = getProxyBaseUrl();
-  const url = `${proxyBase}/route?origin=${lon1},${lat1}&destination=${lon2},${lat2}&alternatives=true`;
+  const url = `${OSRM_BASE_URL}/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&alternatives=true`;
 
   try {
-    console.log("OSRM Fetching URL:", url);
-    // 30 second timeout for routing
-    const response = await fetchWithTimeout(url, 30000);
-    
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`Proxy HTTP Error ${response.status}: ${errorBody}`);
-    }
-    
-    const data = await response.json();
-    console.log(`[OSRM] Received ${data.routes?.length || 0} routes from proxy`);
+    console.log('[OSRM] Fetching:', url);
+    const { data } = await axios.get(url, { timeout: 30000 });
+
+    console.log(`[OSRM] Received ${data.routes?.length || 0} routes`);
     if (data.code !== 'Ok' || !data.routes) throw new Error('No routes found');
 
     return data.routes.map((route: any) => ({
@@ -77,11 +59,11 @@ export const fetchAlternativeRoutes = async (
       })),
     }));
   } catch (error: any) {
-    if (error.name === 'AbortError') {
+    if (axios.isCancel(error) || error.code === 'ECONNABORTED') {
       console.warn('[OSRM] Route request timed out');
       throw new Error('Routing request timed out. Please check your connection.');
     }
-    console.error('Failed to fetch alternative routes:', error);
+    console.error('[OSRM] Failed to fetch alternative routes:', error.message);
     throw error;
   }
 };

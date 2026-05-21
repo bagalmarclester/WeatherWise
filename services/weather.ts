@@ -1,8 +1,8 @@
-import Constants from 'expo-constants';
+import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { parseISO, differenceInMinutes } from 'date-fns';
+import { Platform } from 'react-native';
 import { RAIN_THRESHOLD } from '../utils/constants';
-import { fetchWithTimeout } from '../utils/fetch';
 
 export interface WeatherPointResponse {
   precipitationProbability: number;
@@ -12,20 +12,11 @@ export interface WeatherPointResponse {
   isRainy: boolean;
 }
 
-const PROXY_PORT = 3001;
-
-/**
- * Gets the proxy server URL by extracting the dev machine's IP
- * from Expo's hostUri (which the phone already uses to connect to Metro).
- */
-const getProxyBaseUrl = (): string => {
-  const hostUri = Constants.expoConfig?.hostUri ?? Constants.manifest?.debuggerHost;
-  if (hostUri) {
-    const host = hostUri.split(':')[0];
-    return `http://${host}:${PROXY_PORT}`;
-  }
-  return `http://localhost:${PROXY_PORT}`;
-};
+// Route through localhost proxy on web (dev only), direct to Open-Meteo on mobile
+const OPEN_METEO_BASE_URL =
+  Platform.OS === 'web'
+    ? 'http://localhost:3000/weather'
+    : 'https://api.open-meteo.com/v1/forecast';
 
 /**
  * Converts Open-Meteo WMO weather codes to human-readable labels.
@@ -46,7 +37,7 @@ export const weatherCodeToLabel = (code: number): string => {
 };
 
 /**
- * Fetches weather forecast for a specific coordinate via the local proxy server.
+ * Fetches weather forecast for a specific coordinate directly from Open-Meteo.
  * Includes AsyncStorage caching with a 1-hour temporal bucket.
  */
 export const fetchWeatherAtPoint = async (
@@ -70,20 +61,12 @@ export const fetchWeatherAtPoint = async (
     console.warn('Cache read error:', e);
   }
 
-  // 2. Fetch if not in cache
-  const proxyBase = getProxyBaseUrl();
-  const url = `${proxyBase}/weather?lat=${lat}&lon=${lon}`;
+  // 2. Fetch directly from Open-Meteo
+  const url = `${OPEN_METEO_BASE_URL}?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode&timezone=auto&forecast_days=2`;
 
   try {
-    // 15 second timeout for weather points
-    const response = await fetchWithTimeout(url, 15000);
+    const { data } = await axios.get(url, { timeout: 15000 });
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`Weather HTTP Error ${response.status}: ${errorBody}`);
-    }
-
-    const data = await response.json();
     const hourly = data.hourly;
     if (!hourly) throw new Error('No hourly data found in response');
 
@@ -117,11 +100,11 @@ export const fetchWeatherAtPoint = async (
     return result;
 
   } catch (error: any) {
-    if (error.name === 'AbortError') {
+    if (axios.isCancel(error) || error.code === 'ECONNABORTED') {
       console.warn(`[Weather] Request timed out for point (${lat}, ${lon})`);
       throw new Error('Weather request timed out. Please check your connection.');
     }
-    console.error(`Failed to fetch weather for ${lat},${lon}:`, error);
+    console.error(`[Weather] Failed to fetch weather for ${lat},${lon}:`, error.message);
     throw error;
   }
 };

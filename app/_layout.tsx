@@ -9,7 +9,6 @@ import 'react-native-reanimated';
 
 import NetInfo from '@react-native-community/netinfo';
 import { Text } from 'react-native-paper';
-import { WeatherProvider } from '../context/WeatherContext';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -59,21 +58,19 @@ function RootLayout() {
   }
 
   return (
-    <WeatherProvider>
-      <ThemeProvider value={DarkTheme}>
-        <View style={{ flex: 1 }}>
-          {isOffline && (
-            <View style={styles.offlineBanner}>
-              <Text style={styles.offlineText}>Offline — showing cached weather</Text>
-            </View>
-          )}
-          <Stack>
-            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-            <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
-          </Stack>
-        </View>
-      </ThemeProvider>
-    </WeatherProvider>
+    <ThemeProvider value={DarkTheme}>
+      <View style={{ flex: 1 }}>
+        {isOffline && (
+          <View style={styles.offlineBanner}>
+            <Text style={styles.offlineText}>Offline — showing cached weather</Text>
+          </View>
+        )}
+        <Stack>
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
+        </Stack>
+      </View>
+    </ThemeProvider>
   );
 }
 

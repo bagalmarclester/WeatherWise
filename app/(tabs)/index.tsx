@@ -7,9 +7,8 @@ import { Text, Divider } from 'react-native-paper';
 import { fetchAlternativeRoutes } from '../../services/osrm';
 import { useWeatherAlerts } from '../../hooks/useWeatherAlerts';
 import { LocationSearchInput } from '../../components/LocationSearchInput';
-import { useWeather } from '../../context/WeatherContext';
+import { useWeatherStore } from '../../store/useWeatherStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Constants from 'expo-constants';
 
 const LAST_KNOWN_LOCATION_KEY = 'last_known_location';
 
@@ -30,20 +29,8 @@ const COLORS = {
   yellow: '#F59E0B',
 };
 
-const PROXY_PORT = 3001;
-
-/**
- * Gets the proxy server URL by extracting the dev machine's IP
- * from Expo's hostUri (which the phone already uses to connect to Metro).
- */
-const getProxyBaseUrl = (): string => {
-  const hostUri = Constants.expoConfig?.hostUri ?? Constants.manifest?.debuggerHost;
-  if (hostUri) {
-    const host = hostUri.split(':')[0];
-    return `http://${host}:${PROXY_PORT}`;
-  }
-  return `http://localhost:${PROXY_PORT}`;
-};
+const NOMINATIM_BASE_URL = 'https://nominatim.openstreetmap.org';
+const USER_AGENT = 'WeatherWiseApp/1.0 (tester@um.edu.ph)';
 
 const mapStyle = [
   { "elementType": "geometry", "stylers": [{ "color": "#242f3e" }] },
@@ -77,16 +64,15 @@ export default function MapScreen() {
   const [allRoutes, setAllRoutes] = useState<any[]>([]);
   const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
   
-  const { comparisons, selectedRouteIndex, setSelectedRouteIndex, setAlerts, setSummary, setComparisons } = useWeather();
+  const comparisons = useWeatherStore((s) => s.comparisons);
+  const selectedRouteIndex = useWeatherStore((s) => s.selectedRouteIndex);
+  const clearStoreState = useWeatherStore((s) => s.clearRouteState);
   const { isAnalyzing, compareRoutes, selectRoute } = useWeatherAlerts();
   const mapRef = useRef<MapView>(null);
 
   const clearRouteState = () => {
     setAllRoutes([]);
-    setAlerts([]);
-    setSummary(null);
-    setComparisons([]);
-    setSelectedRouteIndex(0);
+    clearStoreState();
   };
 
   // Smoothly focus on the route whenever the selection changes
@@ -243,12 +229,12 @@ export default function MapScreen() {
         }
       }
 
-      // 4b. Reverse-geocode the best available coords into an address (5s via proxy)
+      // 4b. Reverse-geocode the best available coords into an address
       let resolvedLabel = 'Current Location';
       try {
-        const proxyBase = getProxyBaseUrl();
         const response = await fetch(
-          `${proxyBase}/geocode/reverse?lat=${refinedLat}&lon=${refinedLon}`
+          `${NOMINATIM_BASE_URL}/reverse?lat=${refinedLat}&lon=${refinedLon}&format=json`,
+          { headers: { 'User-Agent': USER_AGENT } }
         );
 
         const data = await response.json();
@@ -256,7 +242,7 @@ export default function MapScreen() {
           resolvedLabel = data.display_name;
         }
       } catch {
-        console.log('[Location] Reverse geocode failed via proxy, keeping "Current Location" label');
+        console.log('[Location] Reverse geocode failed, keeping "Current Location" label');
       }
 
       // 4c. Silently update origin with refined coords + resolved address

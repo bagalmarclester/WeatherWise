@@ -1,9 +1,8 @@
-import { useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fetchWeatherAtPoint, weatherCodeToLabel } from '../services/weather';
 import { SampledWaypoint, sampleWaypoints } from '../utils/spatiotemporal';
 import { RouteResponse } from '../services/osrm';
-import { useWeather } from '../context/WeatherContext';
+import { useWeatherStore } from '../store/useWeatherStore';
 
 
 export interface WeatherAlert {
@@ -36,16 +35,19 @@ export interface RouteComparison extends RouteSummary {
 
 /**
  * Custom hook for analyzing weather along a sampled route.
- * Consume WeatherContext for global state sharing.
+ * Uses Zustand store for global state sharing.
  */
 export const useWeatherAlerts = () => {
-  const { 
-    alerts, setAlerts, 
-    summary, setSummary, 
-    isAnalyzing, setIsAnalyzing,
-    comparisons, setComparisons,
-    setSelectedRouteIndex
-  } = useWeather();
+  const alerts = useWeatherStore((s) => s.alerts);
+  const summary = useWeatherStore((s) => s.summary);
+  const isAnalyzing = useWeatherStore((s) => s.isAnalyzing);
+  const comparisons = useWeatherStore((s) => s.comparisons);
+
+  const setAlerts = useWeatherStore((s) => s.setAlerts);
+  const setSummary = useWeatherStore((s) => s.setSummary);
+  const setIsAnalyzing = useWeatherStore((s) => s.setIsAnalyzing);
+  const setComparisons = useWeatherStore((s) => s.setComparisons);
+  const setSelectedRouteIndex = useWeatherStore((s) => s.setSelectedRouteIndex);
 
   /**
    * Helper to determine severity based on precipitation probability.
@@ -95,7 +97,7 @@ export const useWeatherAlerts = () => {
   /**
    * Compares multiple routes and ranks them by risk.
    */
-  const compareRoutes = useCallback(async (routes: RouteResponse[]): Promise<RouteComparison[]> => {
+  const compareRoutes = async (routes: RouteResponse[]): Promise<RouteComparison[]> => {
     if (routes.length === 0) return [];
     
     setIsAnalyzing(true);
@@ -126,7 +128,7 @@ export const useWeatherAlerts = () => {
         return a.totalDurationMinutes - b.totalDurationMinutes;
       });
 
-      // Update Context
+      // Update store
       setComparisons(sortedComparisons);
       
       // Automatically set the safest/best route as active
@@ -145,7 +147,7 @@ export const useWeatherAlerts = () => {
     } finally {
       setIsAnalyzing(false);
     }
-  }, [setIsAnalyzing, setComparisons, setAlerts, setSummary, setSelectedRouteIndex]);
+  };
 
   /**
    * Fetches weather for a waypoint with AsyncStorage caching.
@@ -195,9 +197,9 @@ export const useWeatherAlerts = () => {
   };
 
   /**
-   * Switches the active route analysis in the global context.
+   * Switches the active route analysis in the store.
    */
-  const selectRoute = useCallback((index: number) => {
+  const selectRoute = (index: number) => {
     const route = comparisons.find(c => c.routeIndex === index);
     if (route) {
       setAlerts(route.alerts);
@@ -209,7 +211,7 @@ export const useWeatherAlerts = () => {
       });
       setSelectedRouteIndex(index);
     }
-  }, [comparisons, setAlerts, setSummary, setSelectedRouteIndex]);
+  };
 
   return { compareRoutes, selectRoute, alerts, isAnalyzing, summary };
 };
