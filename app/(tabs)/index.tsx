@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, TouchableOpacity, ActivityIndicator, Alert, Platform, ScrollView } from 'react-native';
-import MapView, { Polyline, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
+import { StyleSheet, View, TouchableOpacity, ActivityIndicator, Alert, ScrollView } from 'react-native';
+import MapView, { Polyline, Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { BlurView } from 'expo-blur';
 import { Text, Divider } from 'react-native-paper';
@@ -314,7 +314,6 @@ export default function MapScreen() {
         style={styles.map}
         initialRegion={DAVAO_CITY}
         customMapStyle={mapStyle}
-        provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
       >
         {allRoutes.map((route, index) => {
           const isSelected = selectedRouteIndex === index;

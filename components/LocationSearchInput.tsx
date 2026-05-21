@@ -28,7 +28,7 @@ interface LocationSearchInputProps {
   showCurrentLocationButton?: boolean;
 }
 
-const DEBOUNCE_MS = 350;
+const DEBOUNCE_MS = 300;
 const PROXY_PORT = 3001;
 
 /**
@@ -64,6 +64,7 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
   const isEditing = useRef(false);
 
   const debounceTimer = useRef<NodeJS.Timeout | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Sync internal query with external value only when the user is NOT typing
   // (e.g., when "Current Location" is set programmatically from the parent)
@@ -73,10 +74,11 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
     }
   }, [value]);
 
-  // Cleanup debounce on unmount
+  // Cleanup debounce & abort on unmount
   useEffect(() => {
     return () => {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
     };
   }, []);
 
@@ -89,25 +91,41 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
       return;
     }
 
+    // Abort any previous in-flight geocoding request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setLoading(true);
 
     const proxyBase = getProxyBaseUrl();
     const url = `${proxyBase}/geocode/search?q=${encodeURIComponent(trimmed)}`;
 
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: controller.signal });
 
       if (!response.ok) throw new Error('Search failed');
       const data: LocationSearchResult[] = await response.json();
 
-      setResults(data);
-      setShowDropdown(data.length > 0);
+      // Only update UI if this request wasn't aborted
+      if (!controller.signal.aborted) {
+        setResults(data);
+        setShowDropdown(data.length > 0);
+      }
     } catch (error: any) {
+      // Silently ignore aborted requests — they are expected
+      if (error.name === 'AbortError') return;
+
       console.error('Nominatim Search Error:', error);
       setResults([]);
       setShowDropdown(false);
     } finally {
-      setLoading(false);
+      // Only clear loading if this controller is still the active one
+      if (abortControllerRef.current === controller) {
+        setLoading(false);
+      }
     }
   };
 

@@ -43,12 +43,25 @@ const getRiskColor = (severity: 'low' | 'medium' | 'high') => {
 export default function Alerts() {
   const { alerts, summary } = useWeatherAlerts();
 
-  if (!summary || alerts.length === 0) {
+  // No route has been analyzed yet — prompt the user to set one
+  if (!summary) {
     return (
       <View style={styles.emptyContainer}>
         <Text style={styles.emptyEmoji}>🌧️</Text>
         <Text style={styles.emptyText}>
           Set a route on the map to see your weather timeline.
+        </Text>
+      </View>
+    );
+  }
+
+  // Route analyzed but weather is all-clear — no alerts to display
+  if (alerts.length === 0) {
+    return (
+      <View style={styles.emptyContainer}>
+        <Text style={styles.emptyEmoji}>☀️</Text>
+        <Text style={styles.emptyText}>
+          Clear skies along your route! No weather alerts detected.
         </Text>
       </View>
     );
