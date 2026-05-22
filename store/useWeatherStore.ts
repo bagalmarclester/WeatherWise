@@ -8,6 +8,8 @@ interface WeatherState {
   comparisons: RouteComparison[];
   selectedRouteIndex: number;
   isAnalyzing: boolean;
+  originLabel: string | null;
+  destinationLabel: string | null;
 
   // --- Actions ---
   setAlerts: (alerts: WeatherAlert[]) => void;
@@ -15,6 +17,7 @@ interface WeatherState {
   setComparisons: (comparisons: RouteComparison[]) => void;
   setSelectedRouteIndex: (index: number) => void;
   setIsAnalyzing: (is: boolean) => void;
+  setRouteLabels: (origin: string, destination: string) => void;
 
   /** Resets all weather/route state to defaults in a single batch. */
   clearRouteState: () => void;
@@ -27,6 +30,8 @@ export const useWeatherStore = create<WeatherState>((set) => ({
   comparisons: [],
   selectedRouteIndex: 0,
   isAnalyzing: false,
+  originLabel: null,
+  destinationLabel: null,
 
   // --- Setters ---
   setAlerts: (alerts) => set({ alerts }),
@@ -34,6 +39,7 @@ export const useWeatherStore = create<WeatherState>((set) => ({
   setComparisons: (comparisons) => set({ comparisons }),
   setSelectedRouteIndex: (index) => set({ selectedRouteIndex: index }),
   setIsAnalyzing: (is) => set({ isAnalyzing: is }),
+  setRouteLabels: (originLabel, destinationLabel) => set({ originLabel, destinationLabel }),
 
   // --- Compound actions ---
   clearRouteState: () =>
@@ -42,5 +48,7 @@ export const useWeatherStore = create<WeatherState>((set) => ({
       summary: null,
       comparisons: [],
       selectedRouteIndex: 0,
+      originLabel: null,
+      destinationLabel: null,
     }),
 }));

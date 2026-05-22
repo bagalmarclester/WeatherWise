@@ -67,6 +67,7 @@ export default function MapScreen() {
   const comparisons = useWeatherStore((s) => s.comparisons);
   const selectedRouteIndex = useWeatherStore((s) => s.selectedRouteIndex);
   const clearStoreState = useWeatherStore((s) => s.clearRouteState);
+  const setRouteLabels = useWeatherStore((s) => s.setRouteLabels);
   const { isAnalyzing, compareRoutes, selectRoute, summary } = useWeatherAlerts();
   const mapRef = useRef<MapView>(null);
 
@@ -269,6 +270,7 @@ export default function MapScreen() {
         .slice(0, 3);
       
       setAllRoutes(sortedRoutes);
+      setRouteLabels(origin.label, destination.label);
       
       setLoadingState('🌦 Checking weather along your route...');
       const comparisonResults = await compareRoutes(sortedRoutes);

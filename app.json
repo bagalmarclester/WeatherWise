@@ -22,7 +22,8 @@
         "backgroundColor": "#0F172A"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.anonymous.weatherwise"
     },
     "web": {
       "bundler": "metro",

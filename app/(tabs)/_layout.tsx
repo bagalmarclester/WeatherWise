@@ -32,6 +32,15 @@ export default function TabLayout() {
           ),
         }}
       />
+      <Tabs.Screen
+        name="ai"
+        options={{
+          title: 'Assistant',
+          tabBarIcon: ({ color, focused }) => (
+            <TabBarIcon name={focused ? 'mic' : 'mic-outline'} color={color} />
+          ),
+        }}
+      />
     </Tabs>
   );
 }
