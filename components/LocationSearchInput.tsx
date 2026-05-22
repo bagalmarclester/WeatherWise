@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { Text, Divider } from 'react-native-paper';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { getProxyBaseUrl } from '../utils/proxyUrl';
 
 interface LocationSearchResult {
   display_name: string;
@@ -28,8 +29,7 @@ interface LocationSearchInputProps {
 }
 
 const DEBOUNCE_MS = 300;
-const NOMINATIM_BASE_URL = 'https://nominatim.openstreetmap.org';
-const USER_AGENT = 'WeatherWiseApp/1.0 (tester@um.edu.ph)';
+const NOMINATIM_BASE = `${getProxyBaseUrl()}/nominatim`;
 
 /** Stable separator — extracted outside render to avoid re-creating on every frame */
 const ItemSeparator = () => <Divider style={styles.divider} />;
@@ -87,12 +87,11 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
 
     setLoading(true);
 
-    const url = `${NOMINATIM_BASE_URL}/search?q=${encodeURIComponent(trimmed)}&format=json&limit=5&countrycodes=ph`;
+    const url = `${NOMINATIM_BASE}/search?q=${encodeURIComponent(trimmed)}&format=json&limit=5&countrycodes=ph`;
 
     try {
       const response = await fetch(url, {
         signal: controller.signal,
-        headers: { 'User-Agent': USER_AGENT },
       });
 
       if (!response.ok) throw new Error('Search failed');

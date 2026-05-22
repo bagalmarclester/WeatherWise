@@ -1,8 +1,8 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { parseISO, differenceInMinutes } from 'date-fns';
-import { Platform } from 'react-native';
 import { RAIN_THRESHOLD } from '../utils/constants';
+import { getProxyBaseUrl } from '../utils/proxyUrl';
 
 export interface WeatherPointResponse {
   precipitationProbability: number;
@@ -12,11 +12,7 @@ export interface WeatherPointResponse {
   isRainy: boolean;
 }
 
-// Route through localhost proxy on web (dev only), direct to Open-Meteo on mobile
-const OPEN_METEO_BASE_URL =
-  Platform.OS === 'web'
-    ? 'http://localhost:3000/weather'
-    : 'https://api.open-meteo.com/v1/forecast';
+const WEATHER_BASE = `${getProxyBaseUrl()}/weather`;
 
 /**
  * Converts Open-Meteo WMO weather codes to human-readable labels.
@@ -62,7 +58,7 @@ export const fetchWeatherAtPoint = async (
   }
 
   // 2. Fetch directly from Open-Meteo
-  const url = `${OPEN_METEO_BASE_URL}?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode&timezone=auto&forecast_days=2`;
+  const url = `${WEATHER_BASE}?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode&timezone=auto&forecast_days=2`;
 
   try {
     const { data } = await axios.get(url, { timeout: 15000 });

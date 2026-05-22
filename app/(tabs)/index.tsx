@@ -9,6 +9,7 @@ import { useWeatherAlerts } from '../../hooks/useWeatherAlerts';
 import { LocationSearchInput } from '../../components/LocationSearchInput';
 import { useWeatherStore } from '../../store/useWeatherStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getProxyBaseUrl } from '../../utils/proxyUrl';
 
 const LAST_KNOWN_LOCATION_KEY = 'last_known_location';
 
@@ -29,8 +30,7 @@ const COLORS = {
   yellow: '#F59E0B',
 };
 
-const NOMINATIM_BASE_URL = 'https://nominatim.openstreetmap.org';
-const USER_AGENT = 'WeatherWiseApp/1.0 (tester@um.edu.ph)';
+const NOMINATIM_BASE = `${getProxyBaseUrl()}/nominatim`;
 
 const mapStyle = [
   { "elementType": "geometry", "stylers": [{ "color": "#242f3e" }] },
@@ -233,8 +233,7 @@ export default function MapScreen() {
       let resolvedLabel = 'Current Location';
       try {
         const response = await fetch(
-          `${NOMINATIM_BASE_URL}/reverse?lat=${refinedLat}&lon=${refinedLon}&format=json`,
-          { headers: { 'User-Agent': USER_AGENT } }
+          `${NOMINATIM_BASE}/reverse?lat=${refinedLat}&lon=${refinedLon}&format=json`
         );
 
         const data = await response.json();

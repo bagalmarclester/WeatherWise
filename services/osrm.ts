@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { Platform } from 'react-native';
+import { getProxyBaseUrl } from '../utils/proxyUrl';
 
 export interface Location {
   lat: number;
@@ -18,11 +18,7 @@ export interface RouteResponse {
   legs: RouteLeg[];
 }
 
-// Route through localhost proxy on web (dev only), direct to OSRM on mobile
-const OSRM_BASE_URL =
-  Platform.OS === 'web'
-    ? 'http://localhost:3000/osrm'
-    : 'https://router.project-osrm.org';
+const OSRM_BASE = `${getProxyBaseUrl()}/osrm`;
 
 /**
  * Fetches alternative driving routes directly from the OSRM public API.
@@ -40,7 +36,7 @@ export const fetchAlternativeRoutes = async (
   const lon2 = Number(destination.lon);
   const lat2 = Number(destination.lat);
 
-  const url = `${OSRM_BASE_URL}/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&alternatives=true`;
+  const url = `${OSRM_BASE}/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&alternatives=true`;
 
   try {
     console.log('[OSRM] Fetching:', url);
