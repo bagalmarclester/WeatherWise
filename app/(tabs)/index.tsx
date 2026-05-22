@@ -60,19 +60,20 @@ interface Point {
 export default function MapScreen() {
   const [origin, setOrigin] = useState<Point | null>(null);
   const [destination, setDestination] = useState<Point | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadingState, setLoadingState] = useState('');
   const [allRoutes, setAllRoutes] = useState<any[]>([]);
   const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
   
   const comparisons = useWeatherStore((s) => s.comparisons);
   const selectedRouteIndex = useWeatherStore((s) => s.selectedRouteIndex);
   const clearStoreState = useWeatherStore((s) => s.clearRouteState);
-  const { isAnalyzing, compareRoutes, selectRoute } = useWeatherAlerts();
+  const { isAnalyzing, compareRoutes, selectRoute, summary } = useWeatherAlerts();
   const mapRef = useRef<MapView>(null);
 
   const clearRouteState = () => {
     setAllRoutes([]);
     clearStoreState();
+    setLoadingState('');
   };
 
   // Smoothly focus on the route whenever the selection changes
@@ -255,7 +256,7 @@ export default function MapScreen() {
       return;
     }
 
-    setLoading(true);
+    setLoadingState('🗺 Calculating route...');
     try {
       const fetchedRoutes = await fetchAlternativeRoutes(
         { lat: origin.lat, lon: origin.lon },
@@ -269,8 +270,12 @@ export default function MapScreen() {
       
       setAllRoutes(sortedRoutes);
       
+      setLoadingState('🌦 Checking weather along your route...');
       const comparisonResults = await compareRoutes(sortedRoutes);
       
+      setLoadingState('✅ Done — checking results');
+      setTimeout(() => setLoadingState(''), 1500);
+
       // Select the safest/best route by default (top of comparison)
       const safest = comparisonResults[0];
 
@@ -284,8 +289,7 @@ export default function MapScreen() {
 
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Could not fetch routes.');
-    } finally {
-      setLoading(false);
+      setLoadingState('');
     }
   };
 
@@ -304,33 +308,80 @@ export default function MapScreen() {
           const isSelected = selectedRouteIndex === index;
           const comparison = comparisons.find(c => c.routeIndex === index);
           
-          let strokeColor = 'rgba(100, 116, 139, 0.4)'; // Default gray for alts
-          if (isSelected) {
-            strokeColor = comparison?.overallRisk === 'high' ? COLORS.red :
-                         comparison?.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green;
+          if (!isSelected) {
+            // Unselected routes are gray and dashed
+            return (
+              <Polyline
+                key={`route-${index}`}
+                coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
+                strokeWidth={4}
+                strokeColor="rgba(100, 116, 139, 0.4)"
+                lineDashPattern={[5, 5]}
+                zIndex={index}
+                tappable={true}
+                onPress={() => selectRoute(index)}
+              />
+            );
           }
 
-          return (
-            <Polyline
-              key={`route-${index}`}
-              coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
-              strokeWidth={isSelected ? 6 : 4}
-              strokeColor={strokeColor}
-              lineDashPattern={isSelected ? undefined : [5, 5]}
-              zIndex={isSelected ? 10 : index}
-              tappable={true}
-              onPress={() => selectRoute(index)}
-            />
-          );
+          // Selected route: segmented and colored by weather severity
+          if (!comparison || !comparison.alerts || comparison.alerts.length === 0) {
+            return (
+              <Polyline
+                key={`route-${index}`}
+                coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
+                strokeWidth={6}
+                strokeColor={COLORS.electricBlue}
+                zIndex={10}
+              />
+            );
+          }
+
+          const polylines = [];
+          const coords = route.coordinates;
+          const alerts = comparison.alerts;
+
+          let startIndex = 0;
+          for (let i = 0; i < alerts.length; i++) {
+            const alert = alerts[i];
+            const nextAlert = alerts[i + 1];
+            
+            // Assign coords to the nearest waypoint segment
+            const endIndex = nextAlert 
+              ? Math.floor((alert.segmentIndex + nextAlert.segmentIndex) / 2) 
+              : coords.length - 1;
+            
+            // Fallback safety if indexes are weird
+            const start = Math.max(0, Math.min(startIndex, coords.length - 1));
+            const end = Math.max(0, Math.min(endIndex, coords.length - 1));
+            
+            const segmentCoords = coords.slice(start, end + 1).map((p: any) => ({ latitude: p.lat, longitude: p.lon }));
+            
+            const color = alert.severity === 'high' ? COLORS.red : alert.severity === 'moderate' ? COLORS.yellow : COLORS.green;
+            
+            polylines.push(
+              <Polyline
+                key={`route-seg-${i}`}
+                coordinates={segmentCoords}
+                strokeWidth={6}
+                strokeColor={color}
+                zIndex={10}
+              />
+            );
+            
+            startIndex = end; // start next segment where this one ended
+          }
+          return polylines;
         })}
         
         {currentComparison?.alerts?.filter(a => a.severity === 'high').map((alert, index) => (
           <Marker
             key={`alert-${index}`}
             coordinate={{ latitude: alert.lat, longitude: alert.lon }}
-            title="Rain Alert"
+            title={alert.label}
+            description={`${alert.precipitationProbability}% rain · in ${alert.minutesFromNow} min`}
           >
-            <View style={styles.alertMarker}><Text style={{ fontSize: 24 }}>🌧️</Text></View>
+            <View style={styles.alertMarker}><Text style={{ fontSize: 24 }}>⛈️</Text></View>
           </Marker>
         ))}
 
@@ -375,11 +426,33 @@ export default function MapScreen() {
                 setDestination(null);
               }}
             />
-            <TouchableOpacity style={styles.button} onPress={handleGetRoute} disabled={loading || isAnalyzing}>
-              {loading || isAnalyzing ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Compare Routes</Text>}
+            <TouchableOpacity style={styles.button} onPress={handleGetRoute} disabled={!!loadingState || isAnalyzing}>
+              {loadingState || isAnalyzing ? (
+                <Text style={styles.buttonText}>{loadingState || 'Analyzing...'}</Text>
+              ) : (
+                <Text style={styles.buttonText}>Compare Routes</Text>
+              )}
             </TouchableOpacity>
           </View>
         </BlurView>
+        
+        {/* Dynamic Summary Banner */}
+        {summary && (
+          <TouchableOpacity 
+            style={[
+              styles.summaryBanner,
+              { backgroundColor: summary.overallRisk === 'high' ? COLORS.red : summary.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green }
+            ]}
+          >
+            {summary.overallRisk === 'clear' && <Text style={styles.summaryText}>✅ Route looks clear all the way</Text>}
+            {summary.overallRisk === 'moderate' && <Text style={styles.summaryText}>⚠ Some rain possible — see timeline</Text>}
+            {summary.overallRisk === 'high' && (
+              <Text style={styles.summaryText}>
+                ⛈ {summary.firstHazardLabel} in {summary.firstHazardMinutes} min · Tap for alternatives
+              </Text>
+            )}
+          </TouchableOpacity>
+        )}
       </View>
 
       {comparisons?.length > 0 && (
@@ -461,4 +534,6 @@ const styles = StyleSheet.create({
   extraText: { color: COLORS.yellow, fontSize: 11, fontWeight: '600' },
   recommendation: { color: COLORS.green, fontSize: 11, fontWeight: '700', marginTop: 4 },
   alertMarker: { alignItems: 'center' },
+  summaryBanner: { marginTop: 8, padding: 12, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  summaryText: { color: COLORS.navy, fontWeight: '800', fontSize: 14 },
 });

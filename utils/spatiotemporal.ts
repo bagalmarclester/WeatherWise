@@ -9,6 +9,8 @@ export interface Location {
 
 export interface SampledWaypoint extends Location {
   eta: Date;
+  etaISO: string;
+  segmentLabel: string;
   segmentIndex: number;
 }
 
@@ -94,13 +96,20 @@ export const sampleWaypoints = (
     }
 
     const eta = new Date(departureTime.getTime() + targetMinutes * 60 * 1000);
+    const segmentLabel = `~${Math.round(targetMinutes)} min into trip`;
+    
+    // Ensure ISO format without milliseconds for Open-Meteo matching: "YYYY-MM-DDTHH:mm"
+    const isoFull = eta.toISOString();
+    const etaISO = isoFull.substring(0, 16);
     
     waypoints.push({
       ...coordinates[closestIdx],
       eta,
+      etaISO,
+      segmentLabel,
       segmentIndex: closestIdx,
     });
-  } );
+  });
 
   // Ensure uniqueness (in case segments are very short)
   return waypoints.filter((wp, idx, self) => 

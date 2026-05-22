@@ -3,6 +3,7 @@ import { fetchWeatherAtPoint, weatherCodeToLabel } from '../services/weather';
 import { SampledWaypoint, sampleWaypoints } from '../utils/spatiotemporal';
 import { RouteResponse } from '../services/osrm';
 import { useWeatherStore } from '../store/useWeatherStore';
+import { format } from 'date-fns';
 
 
 export interface WeatherAlert {
@@ -10,18 +11,29 @@ export interface WeatherAlert {
   lat: number;
   lon: number;
   eta: Date;
+  etaFormatted: string;
+  minutesFromNow: number;
   precipitationProbability: number;
   precipitationMm: number;
   weatherCode: number;
+  windspeedKph: number;
+  temperatureC: number;
+  severity: 'clear' | 'moderate' | 'high';
   label: string;
-  severity: 'low' | 'medium' | 'high';
+  isHazardous: boolean;
+  segmentLabel: string;
+  segmentIndex: number;
 }
 
 export interface RouteSummary {
   totalWaypoints: number;
-  riskyWaypoints: number;
-  firstAlertMinutes: number | null;
+  clearWaypoints: number;
+  moderateWaypoints: number;
+  hazardousWaypoints: number;
+  firstHazardMinutes: number | null;
+  firstHazardLabel: string | null;
   overallRisk: 'clear' | 'moderate' | 'high';
+  analysisTimeMs: number;
 }
 
 export interface RouteComparison extends RouteSummary {
@@ -50,46 +62,53 @@ export const useWeatherAlerts = () => {
   const setSelectedRouteIndex = useWeatherStore((s) => s.setSelectedRouteIndex);
 
   /**
-   * Helper to determine severity based on precipitation probability.
-   */
-  const getSeverity = (prob: number): 'low' | 'medium' | 'high' => {
-    if (prob < 40) return 'low';
-    if (prob <= 60) return 'medium';
-    return 'high';
-  };
-
-  /**
    * Internal analyzer for a single set of waypoints.
    */
   const analyzeSingleRoute = async (waypoints: SampledWaypoint[]): Promise<{ alerts: WeatherAlert[], summary: RouteSummary }> => {
+    const startTime = Date.now();
+    
+    // Fetch all waypoints in parallel!
     const results = await Promise.all(
       waypoints.map((wp, idx) => fetchWithCache(wp, idx))
     );
 
-    const activeAlerts = results.filter(r => r.severity !== 'low' || r.precipitationMm > 0);
-    const risky = results.filter(r => r.severity === 'high');
-    const now = new Date();
+    // Filter out nulls (failed to fetch/match)
+    const validAlerts = results.filter((r): r is WeatherAlert => r !== null);
+
+    const clearCount = validAlerts.filter(r => r.severity === 'clear').length;
+    const moderateCount = validAlerts.filter(r => r.severity === 'moderate').length;
+    const hazardous = validAlerts.filter(r => r.severity === 'high');
+
+    let firstHazardMinutes: number | null = null;
+    let firstHazardLabel: string | null = null;
     
-    let firstAlertMinutes: number | null = null;
-    if (risky.length > 0) {
-      const firstHigh = risky[0];
-      firstAlertMinutes = Math.round((firstHigh.eta.getTime() - now.getTime()) / (1000 * 60));
+    if (hazardous.length > 0) {
+      const firstHigh = hazardous[0];
+      firstHazardMinutes = firstHigh.minutesFromNow;
+      firstHazardLabel = firstHigh.label;
     }
 
     let overallRisk: 'clear' | 'moderate' | 'high' = 'clear';
-    if (risky.length > 0) {
+    if (hazardous.length > 0) {
       overallRisk = 'high';
-    } else if (activeAlerts.some(a => a.severity === 'medium')) {
+    } else if (moderateCount > 0) {
       overallRisk = 'moderate';
     }
+    
+    const analysisTimeMs = Date.now() - startTime;
+    console.log(`WeatherWise: Analyzed ${waypoints.length} waypoints in ${analysisTimeMs}ms — Risk: ${overallRisk}, First hazard: ${firstHazardMinutes} min`);
 
     return {
-      alerts: activeAlerts,
+      alerts: validAlerts,
       summary: {
         totalWaypoints: waypoints.length,
-        riskyWaypoints: risky.length,
-        firstAlertMinutes,
+        clearWaypoints: clearCount,
+        moderateWaypoints: moderateCount,
+        hazardousWaypoints: hazardous.length,
+        firstHazardMinutes,
+        firstHazardLabel,
         overallRisk,
+        analysisTimeMs,
       }
     };
   };
@@ -136,9 +155,13 @@ export const useWeatherAlerts = () => {
       setAlerts(best.alerts);
       setSummary({
         totalWaypoints: best.totalWaypoints,
-        riskyWaypoints: best.riskyWaypoints,
-        firstAlertMinutes: best.firstAlertMinutes,
+        clearWaypoints: best.clearWaypoints,
+        moderateWaypoints: best.moderateWaypoints,
+        hazardousWaypoints: best.hazardousWaypoints,
+        firstHazardMinutes: best.firstHazardMinutes,
+        firstHazardLabel: best.firstHazardLabel,
         overallRisk: best.overallRisk,
+        analysisTimeMs: best.analysisTimeMs,
       });
       setSelectedRouteIndex(best.routeIndex);
 
@@ -152,48 +175,57 @@ export const useWeatherAlerts = () => {
   /**
    * Fetches weather for a waypoint with AsyncStorage caching.
    * Cache key format: weather_cache_{lat}_{lon}_{hour}
+   * Uses 60 minute TTL.
    */
-  const fetchWithCache = async (wp: SampledWaypoint, index: number): Promise<WeatherAlert> => {
+  const fetchWithCache = async (wp: SampledWaypoint, index: number): Promise<WeatherAlert | null> => {
     const lat = wp.lat.toFixed(3);
     const lon = wp.lon.toFixed(3);
-    const hour = wp.eta.getHours();
-    const day = wp.eta.getDate();
-    const cacheKey = `weather_cache_${lat}_${lon}_${day}_${hour}`;
+    const hour = wp.etaISO.substring(0, 13); // e.g. 2026-04-15T14
+    const cacheKey = `wx_${lat}_${lon}_${hour}`;
 
     try {
-      const cached = await AsyncStorage.getItem(cacheKey);
-      if (cached) {
-        const data = JSON.parse(cached);
-        return {
-          ...data,
-          waypointIndex: index,
-          eta: wp.eta, // Use the fresh ETA from waypoint
-        };
+      const cachedStr = await AsyncStorage.getItem(cacheKey);
+      if (cachedStr) {
+        const cachedObj = JSON.parse(cachedStr);
+        const ageMinutes = (Date.now() - cachedObj.timestamp) / 60000;
+        if (ageMinutes < 60) {
+          return buildWeatherAlert(wp, index, cachedObj.data);
+        }
       }
     } catch (e) {
       console.warn('Cache read error:', e);
     }
 
     // Fetch fresh data
-    const weather = await fetchWeatherAtPoint(wp.lat, wp.lon, wp.eta.toISOString());
-    const severity = getSeverity(weather.precipitationProbability);
+    const weather = await fetchWeatherAtPoint(wp.lat, wp.lon, wp.etaISO);
+    if (!weather) return null;
     
-    const alert: WeatherAlert = {
+    // Save to cache (async)
+    const cachePayload = { timestamp: Date.now(), data: weather };
+    AsyncStorage.setItem(cacheKey, JSON.stringify(cachePayload)).catch(e => console.warn('Cache write error:', e));
+
+    return buildWeatherAlert(wp, index, weather);
+  };
+
+  const buildWeatherAlert = (wp: SampledWaypoint, index: number, weather: any): WeatherAlert => {
+    return {
       waypointIndex: index,
       lat: wp.lat,
       lon: wp.lon,
       eta: wp.eta,
+      etaFormatted: format(wp.eta, 'h:mm a'),
+      minutesFromNow: Math.max(0, Math.round((wp.eta.getTime() - Date.now()) / 60000)),
       precipitationProbability: weather.precipitationProbability,
       precipitationMm: weather.precipitationMm,
       weatherCode: weather.weatherCode,
-      label: weatherCodeToLabel(weather.weatherCode),
-      severity,
+      windspeedKph: weather.windspeedKph,
+      temperatureC: weather.temperatureC,
+      severity: weather.severity,
+      label: weather.label,
+      isHazardous: weather.isHazardous,
+      segmentLabel: wp.segmentLabel,
+      segmentIndex: wp.segmentIndex,
     };
-
-    // Save to cache (async)
-    AsyncStorage.setItem(cacheKey, JSON.stringify(alert)).catch(e => console.warn('Cache write error:', e));
-
-    return alert;
   };
 
   /**
@@ -205,9 +237,13 @@ export const useWeatherAlerts = () => {
       setAlerts(route.alerts);
       setSummary({
         totalWaypoints: route.totalWaypoints,
-        riskyWaypoints: route.riskyWaypoints,
-        firstAlertMinutes: route.firstAlertMinutes,
+        clearWaypoints: route.clearWaypoints,
+        moderateWaypoints: route.moderateWaypoints,
+        hazardousWaypoints: route.hazardousWaypoints,
+        firstHazardMinutes: route.firstHazardMinutes,
+        firstHazardLabel: route.firstHazardLabel,
         overallRisk: route.overallRisk,
+        analysisTimeMs: route.analysisTimeMs,
       });
       setSelectedRouteIndex(index);
     }

@@ -8,8 +8,12 @@ export interface WeatherPointResponse {
   precipitationProbability: number;
   precipitationMm: number;
   weatherCode: number;
+  windspeedKph: number;
+  temperatureC: number;
   matchedTime: string;
-  isRainy: boolean;
+  isHazardous: boolean;
+  severity: 'clear' | 'moderate' | 'high';
+  label: string;
 }
 
 const WEATHER_BASE = `${getProxyBaseUrl()}/weather`;
@@ -18,30 +22,24 @@ const WEATHER_BASE = `${getProxyBaseUrl()}/weather`;
  * Converts Open-Meteo WMO weather codes to human-readable labels.
  */
 export const weatherCodeToLabel = (code: number): string => {
-  if (code === 0) return 'Clear sky';
-  if (code >= 1 && code <= 3) return 'Partly cloudy';
-  if (code === 45 || code === 48) return 'Fog';
-  if (code >= 51 && code <= 55) return 'Drizzle';
-  if (code >= 61 && code <= 65) return 'Rain';
-  if (code >= 66 && code <= 67) return 'Freezing Rain';
-  if (code >= 71 && code <= 75) return 'Snow fall';
-  if (code === 77) return 'Snow grains';
-  if (code >= 80 && code <= 82) return 'Rain showers';
-  if (code >= 85 && code <= 86) return 'Snow showers';
-  if (code >= 95) return 'Thunderstorm';
-  return 'Unknown';
+  if (code === 0) return 'Clear Sky';
+  if ([1, 2, 3].includes(code)) return 'Partly Cloudy';
+  if ([45, 48].includes(code)) return 'Foggy';
+  if ([51, 53, 55].includes(code)) return 'Drizzle';
+  if ([61, 63, 65].includes(code)) return 'Rain';
+  if ([71, 73, 75].includes(code)) return 'Snow';
+  if ([80, 81, 82].includes(code)) return 'Rain Showers';
+  if (code === 95) return 'Thunderstorm';
+  if ([96, 99].includes(code)) return 'Thunderstorm with Hail';
+  return 'Cloudy';
 };
 
-/**
- * Fetches weather forecast for a specific coordinate directly from Open-Meteo.
- * Includes AsyncStorage caching with a 1-hour temporal bucket.
- */
 export const fetchWeatherAtPoint = async (
   lat: number,
   lon: number,
-  isoDatetime: string
-): Promise<WeatherPointResponse> => {
-  const arrivalTime = parseISO(isoDatetime);
+  etaISO: string
+): Promise<WeatherPointResponse | null> => {
+  const arrivalTime = parseISO(etaISO);
   const hour = arrivalTime.getHours();
   const day = arrivalTime.getDate();
   const cacheKey = `weather_cache_${lat.toFixed(3)}_${lon.toFixed(3)}_${day}_${hour}`;
@@ -57,8 +55,8 @@ export const fetchWeatherAtPoint = async (
     console.warn('Cache read error:', e);
   }
 
-  // 2. Fetch directly from Open-Meteo
-  const url = `${WEATHER_BASE}?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode&timezone=auto&forecast_days=2`;
+  // 2. Fetch directly from proxy
+  const url = `${WEATHER_BASE}?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode,windspeed_10m,temperature_2m&timezone=auto&forecast_days=2`;
 
   try {
     const { data } = await axios.get(url, { timeout: 15000 });
@@ -66,7 +64,7 @@ export const fetchWeatherAtPoint = async (
     const hourly = data.hourly;
     if (!hourly) throw new Error('No hourly data found in response');
 
-    let closestIndex = 0;
+    let closestIndex = -1;
     let minDiff = Infinity;
 
     for (let i = 0; i < hourly.time.length; i++) {
@@ -78,16 +76,33 @@ export const fetchWeatherAtPoint = async (
       }
     }
 
+    if (closestIndex === -1 || minDiff > 30) {
+      console.warn(`[Weather] No suitable forecast found within 30 min of ${etaISO} at ${lat}, ${lon}`);
+      return null;
+    }
+
     const prob = hourly.precipitation_probability[closestIndex];
     const precip = hourly.precipitation[closestIndex];
     const code = hourly.weathercode[closestIndex];
+    const wind = hourly.windspeed_10m[closestIndex];
+    const temp = hourly.temperature_2m[closestIndex];
+
+    const isHazardous = prob > 60;
+    
+    let severity: 'clear' | 'moderate' | 'high' = 'clear';
+    if (isHazardous) severity = 'high';
+    else if (prob >= 20) severity = 'moderate';
 
     const result: WeatherPointResponse = {
       precipitationProbability: prob,
       precipitationMm: precip,
       weatherCode: code,
+      windspeedKph: wind,
+      temperatureC: temp,
       matchedTime: hourly.time[closestIndex],
-      isRainy: prob > (RAIN_THRESHOLD * 100),
+      isHazardous,
+      severity,
+      label: weatherCodeToLabel(code),
     };
 
     // 3. Save to cache

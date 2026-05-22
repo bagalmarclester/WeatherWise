@@ -71,7 +71,9 @@ export default function Alerts() {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text variant="headlineMedium" style={styles.title}>Weather Timeline</Text>
-        <Text style={styles.subtitle}>Analyzing {summary.totalWaypoints} waypoints along your route</Text>
+        <Text style={styles.subtitle}>
+          {summary.totalWaypoints} checkpoints · {summary.hazardousWaypoints} hazards · Analysis: {summary.analysisTimeMs}ms
+        </Text>
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -99,13 +101,11 @@ export default function Alerts() {
                       <Text style={styles.weatherIcon}>{getWeatherEmoji(alert.weatherCode)}</Text>
                       <View>
                         <Text style={styles.alertLabel}>{alert.label}</Text>
-                        <Text style={styles.segmentText}>
-                          Waypoint {alert.waypointIndex + 1} — ~{minutesFromStart > 0 ? minutesFromStart : 0} min into trip
-                        </Text>
+                        <Text style={styles.segmentText}>{alert.segmentLabel}</Text>
                       </View>
                     </View>
 
-                    <View style={styles.statsRow}>
+                    <View style={styles.statsGrid}>
                       <View style={styles.stat}>
                         <Text style={styles.statValue}>{alert.precipitationProbability}%</Text>
                         <Text style={styles.statLabel}>Rain Prob.</Text>
@@ -114,6 +114,17 @@ export default function Alerts() {
                         <Text style={styles.statValue}>{alert.precipitationMm}mm</Text>
                         <Text style={styles.statLabel}>Precip.</Text>
                       </View>
+                      <View style={styles.stat}>
+                        <Text style={styles.statValue}>{alert.windspeedKph}kph</Text>
+                        <Text style={styles.statLabel}>Wind</Text>
+                      </View>
+                      <View style={styles.stat}>
+                        <Text style={styles.statValue}>{alert.temperatureC}°C</Text>
+                        <Text style={styles.statLabel}>Temp</Text>
+                      </View>
+                    </View>
+                    
+                    <View style={[styles.riskBadgeWrapper, { marginTop: 12 }]}>
                       <View style={[styles.riskBadge, { backgroundColor: riskColor + '20', borderColor: riskColor }]}>
                         <Text style={[styles.riskBadgeText, { color: riskColor }]}>
                           {alert.severity.toUpperCase()} RISK
@@ -208,13 +219,14 @@ const styles = StyleSheet.create({
     color: COLORS.gray,
     fontSize: 12,
   },
-  statsRow: {
+  statsGrid: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    marginTop: 8,
   },
   stat: {
-    alignItems: 'flex-start',
+    width: '50%',
+    marginBottom: 12,
   },
   statValue: {
     color: COLORS.white,
@@ -226,6 +238,9 @@ const styles = StyleSheet.create({
     fontSize: 10,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
+  },
+  riskBadgeWrapper: {
+    alignItems: 'flex-start',
   },
   riskBadge: {
     paddingHorizontal: 8,
