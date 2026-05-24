@@ -32,6 +32,9 @@ export default function AiAssistantScreen() {
       if (recording) {
         recording.stopAndUnloadAsync();
       }
+      if (recordingTimeoutRef.current) {
+        clearTimeout(recordingTimeoutRef.current);
+      }
       Speech.stop();
     };
   }, []);
@@ -50,6 +53,44 @@ export default function AiAssistantScreen() {
     }
   }, [uiState]);
 
+  const recordingStartTime = useRef<number>(0);
+  const recordingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const stopAndProcessRecording = async (rec: Audio.Recording) => {
+    setUiState('thinking');
+    try {
+      const duration = Date.now() - recordingStartTime.current;
+      await rec.stopAndUnloadAsync();
+      const uri = rec.getURI();
+      setRecording(null);
+
+      // Reset audio mode so TTS/playback works on Android
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+      });
+
+      if (!uri) {
+        setAiResponse('Recording failed — no audio file was created.');
+        setUiState('idle');
+        return;
+      }
+
+      // Minimum ~1 second of audio so Gemini can actually process it
+      if (duration < 1000) {
+        setAiResponse('Recording too short. Hold the mic for at least 1 second.');
+        setUiState('idle');
+        return;
+      }
+
+      processAudio(uri);
+    } catch (err) {
+      console.error('Failed to stop recording', err);
+      setAiResponse('Failed to stop recording. Please try again.');
+      setUiState('idle');
+    }
+  };
+
   const handleMicPress = async () => {
     if (uiState === 'speaking') {
       Speech.stop();
@@ -59,20 +100,11 @@ export default function AiAssistantScreen() {
 
     if (uiState === 'listening' && recording) {
       // User tapped to stop manually
-      setUiState('thinking');
-      try {
-        await recording.stopAndUnloadAsync();
-        const uri = recording.getURI();
-        setRecording(null);
-        if (uri) {
-          processAudio(uri);
-        } else {
-          setUiState('idle');
-        }
-      } catch (err) {
-        console.error('Failed to stop recording', err);
-        setUiState('idle');
+      if (recordingTimeoutRef.current) {
+        clearTimeout(recordingTimeoutRef.current);
+        recordingTimeoutRef.current = null;
       }
+      await stopAndProcessRecording(recording);
     } else if (uiState === 'idle' || uiState === 'thinking') {
       // Start listening
       setAiResponse('');
@@ -86,9 +118,17 @@ export default function AiAssistantScreen() {
           Audio.RecordingOptionsPresets.HIGH_QUALITY
         );
         setRecording(newRecording);
+        recordingStartTime.current = Date.now();
         setUiState('listening');
-      } catch (e) {
+
+        // Auto-stop after 30 seconds to prevent hanging
+        recordingTimeoutRef.current = setTimeout(async () => {
+          console.log('[AI] Auto-stopping recording after 30s');
+          await stopAndProcessRecording(newRecording);
+        }, 30000);
+      } catch (e: any) {
         console.error('Failed to start recording', e);
+        setAiResponse(`Mic error: ${e?.message || 'Could not start recording. Check mic permissions.'}`);
         setUiState('idle');
       }
     }
@@ -123,9 +163,10 @@ export default function AiAssistantScreen() {
         onDone: () => setUiState('idle'),
         onError: () => setUiState('idle'),
       });
-    } catch (error) {
-      console.error(error);
-      setAiResponse('Sorry, I encountered an error connecting to the AI.');
+    } catch (error: any) {
+      console.error('[AI] processAudio error:', error);
+      const msg = error?.message || 'Unknown error connecting to the AI.';
+      setAiResponse(`Error: ${msg}`);
       setUiState('idle');
     }
   };

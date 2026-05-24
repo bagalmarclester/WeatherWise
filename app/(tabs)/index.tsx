@@ -51,6 +51,24 @@ const mapStyle = [
   { "featureType": "water", "elementType": "labels.text.stroke", "stylers": [{ "color": "#17263c" }] }
 ];
 
+/**
+ * Returns an emoji based on the WMO weather code.
+ */
+const getWeatherEmoji = (code: number): string => {
+  if (code === 0) return '☀️';
+  if (code >= 1 && code <= 3) return '⛅';
+  if (code === 45 || code === 48) return '🌫️';
+  if (code >= 51 && code <= 55) return '🌦️';
+  if (code >= 61 && code <= 65) return '🌧️';
+  if (code >= 66 && code <= 67) return '❄️';
+  if (code >= 71 && code <= 75) return '🌨️';
+  if (code === 77) return '🌨️';
+  if (code >= 80 && code <= 82) return '🚿';
+  if (code >= 85 && code <= 86) return '❄️';
+  if (code >= 95) return '⛈️';
+  return '❓';
+};
+
 interface Point {
   lat: number;
   lon: number;
@@ -376,16 +394,22 @@ export default function MapScreen() {
           return polylines;
         })}
         
-        {currentComparison?.alerts?.filter(a => a.severity === 'high').map((alert, index) => (
-          <Marker
-            key={`alert-${index}`}
-            coordinate={{ latitude: alert.lat, longitude: alert.lon }}
-            title={alert.label}
-            description={`${alert.precipitationProbability}% rain · in ${alert.minutesFromNow} min`}
-          >
-            <View style={styles.alertMarker}><Text style={{ fontSize: 24 }}>⛈️</Text></View>
-          </Marker>
-        ))}
+        {currentComparison?.alerts?.filter(a => a.severity !== 'clear').map((alert, index) => {
+          const emoji = getWeatherEmoji(alert.weatherCode);
+          const markerColor = alert.severity === 'high' ? COLORS.red : COLORS.yellow;
+          return (
+            <Marker
+              key={`alert-${index}`}
+              coordinate={{ latitude: alert.lat, longitude: alert.lon }}
+              title={alert.label}
+              description={`${alert.precipitationProbability}% rain · in ${alert.minutesFromNow} min`}
+            >
+              <View style={[styles.alertMarker, { borderColor: markerColor, borderWidth: 2, borderRadius: 20, backgroundColor: 'rgba(15,23,42,0.85)', padding: 4 }]}>
+                <Text style={{ fontSize: 20 }}>{emoji}</Text>
+              </View>
+            </Marker>
+          );
+        })}
 
         {userLocation && (
           <Marker

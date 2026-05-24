@@ -1,9 +1,11 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import axios from 'axios';
+import { getProxyBaseUrl } from '../utils/proxyUrl';
 
-const genAI = new GoogleGenerativeAI(
-  process.env.EXPO_PUBLIC_GEMINI_API_KEY ?? ''
-);
-
+/**
+ * Sends base64 audio and navigation metadata to the local proxy server,
+ * which forwards the request to Google Gemini to prevent direct connection blocks
+ * and native runtime stream issues on restrictive devices.
+ */
 export async function fetchAiResponse(
   base64Audio: string,
   origin: string,
@@ -12,33 +14,41 @@ export async function fetchAiResponse(
   firstHazardLabel: string | null,
   firstHazardMinutes: number | null
 ): Promise<string> {
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-1.5-flash',
-    systemInstruction: `You are WeatherWise, a voice driving
-      assistant inside a mobile navigation app. Always give
-      SHORT answers in plain sentences — no bullet points,
-      no markdown, no lists. Maximum 2-3 sentences. The driver
-      is behind the wheel so keep it simple and clear.
-      
-      Current route context:
-      - From: ${origin}
-      - To: ${destination}
-      - Overall risk: ${overallRisk}
-      - First hazard: ${firstHazardLabel ?? 'none'} in
-        ${firstHazardMinutes ?? 'N/A'} minutes`,
-  });
+  const proxyUrl = `${getProxyBaseUrl()}/api/ai`;
+  console.log(
+    `[AI Assistant] Requesting proxy AI assistant at ${proxyUrl} (${Math.round(base64Audio.length / 1024)} KB base64)...`
+  );
 
-  const audioPart = {
-    inlineData: {
-      data: base64Audio,
-      mimeType: "audio/mp4" // expo-av HIGH_QUALITY preset uses .m4a/.mp4
+  try {
+    const { data } = await axios.post(proxyUrl, {
+      audio: base64Audio,
+      origin,
+      destination,
+      overallRisk,
+      firstHazardLabel,
+      firstHazardMinutes,
+    }, { timeout: 35000 });
+
+    if (!data || !data.response) {
+      throw new Error('Received an empty response from the AI assistant.');
     }
-  };
 
-  const result = await model.generateContent([
-    audioPart,
-    { text: "Listen to the driver's voice command and reply with driving advice. Keep it short." }
-  ]);
-  
-  return result.response.text();
+    console.log(`[AI Assistant] Response received: "${data.response.substring(0, 100)}..."`);
+    return data.response;
+  } catch (error: any) {
+    console.error('[AI Assistant] Proxy AI error:', error.message);
+
+    if (error.response) {
+      const serverMsg = error.response.data?.error || error.response.data;
+      if (typeof serverMsg === 'string') {
+        if (serverMsg.includes('API_KEY_INVALID') || serverMsg.includes('quota') || serverMsg.includes('429')) {
+          throw new Error('Gemini API quota exceeded or key invalid. Check your laptop terminal logs.');
+        }
+        throw new Error(serverMsg);
+      }
+    }
+    
+    throw new Error('Failed to get AI response. Please ensure the proxy server is running.');
+  }
 }
+

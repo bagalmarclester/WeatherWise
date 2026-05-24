@@ -34,9 +34,9 @@ const getWeatherEmoji = (code: number): string => {
   return '❓';
 };
 
-const getRiskColor = (severity: 'low' | 'medium' | 'high') => {
+const getRiskColor = (severity: 'clear' | 'moderate' | 'high') => {
   if (severity === 'high') return COLORS.red;
-  if (severity === 'medium') return COLORS.yellow;
+  if (severity === 'moderate') return COLORS.yellow;
   return COLORS.green;
 };
 

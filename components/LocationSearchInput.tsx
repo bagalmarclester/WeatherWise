@@ -50,7 +50,7 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
   // Track whether the user is actively editing — prevents external value syncing mid-typing
   const isEditing = useRef(false);
 
-  const debounceTimer = useRef<NodeJS.Timeout | null>(null);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // Sync internal query with external value only when the user is NOT typing
