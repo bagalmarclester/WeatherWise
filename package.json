@@ -14,7 +14,7 @@
     "web": "expo start --web",
     "proxy": "node server/proxy.js",
     "type-check": "tsc --noEmit",
-    "test": "ts-node test_suite.ts"
+    "test": "tsx test_suite.ts"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
@@ -64,6 +64,7 @@
     "dotenv": "^16.6.1",
     "react-test-renderer": "19.1.0",
     "ts-node": "^10.9.2",
+    "tsx": "^4.23.12",
     "typescript": "~5.9.2"
   },
   "private": true
