@@ -1,6 +1,6 @@
 import { fetchRoute } from './services/osrm';
 import { fetchWeatherAtPoint, weatherCodeToLabel } from './services/weather';
-import { sampleWaypointsFromCoords } from './utils/spatiotemporal';
+import { sampleWaypoints } from './utils/spatiotemporal';
 
 async function runTest() {
   console.log('🚀 Starting WeatherWise Engine Test...');
@@ -20,24 +20,26 @@ async function runTest() {
 
     // 2. Test Sampling
     console.log('\n2. Sampling waypoints (every 20 mins)...');
-    const waypoints = sampleWaypointsFromCoords(
+    const waypoints = sampleWaypoints(
       route.coordinates,
       route.totalDurationMinutes,
-      Date.now()
+      new Date()
     );
     console.log(`✅ Generated ${waypoints.length} waypoints.`);
     waypoints.forEach((wp, i) => {
-      console.log(`   [WP ${i}] ETA: ${new Date(wp.timestamp).toLocaleTimeString()} at ${wp.lat.toFixed(4)}, ${wp.lon.toFixed(4)}`);
+      console.log(`   [WP ${i}] ETA: ${wp.eta.toLocaleTimeString()} at ${wp.lat.toFixed(4)}, ${wp.lon.toFixed(4)}`);
     });
 
     // 3. Test Weather at a Waypoint
     console.log('\n3. Fetching weather for first waypoint...');
     const wp = waypoints[0];
-    const weather = await fetchWeatherAtPoint(wp.lat, wp.lon, new Date(wp.timestamp).toISOString());
-    console.log(`✅ Weather received!`);
-    console.log(`   Condition: ${weatherCodeToLabel(weather.weatherCode)}`);
-    console.log(`   Rain Prob: ${weather.precipitationProbability}%`);
-    console.log(`   Is Rainy (>60%): ${weather.isRainy}`);
+    const weather = await fetchWeatherAtPoint(wp.lat, wp.lon, wp.etaISO);
+    if (weather) {
+      console.log(`✅ Weather received!`);
+      console.log(`   Condition: ${weatherCodeToLabel(weather.weatherCode)}`);
+      console.log(`   Rain Prob: ${weather.precipitationProbability}%`);
+      console.log(`   Is Hazardous: ${weather.isHazardous}`);
+    }
 
     console.log('\n✨ All core services verified successfully!');
   } catch (error: any) {

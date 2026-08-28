@@ -63,3 +63,21 @@ export const fetchAlternativeRoutes = async (
     throw error;
   }
 };
+
+/**
+ * Fetches the primary driving route directly from the OSRM public API.
+ *
+ * @param origin - Starting coordinates { lat, lon }
+ * @param destination - Ending coordinates { lat, lon }
+ * @returns Primary route response
+ */
+export const fetchRoute = async (
+  origin: Location,
+  destination: Location
+): Promise<RouteResponse> => {
+  const routes = await fetchAlternativeRoutes(origin, destination);
+  if (!routes || routes.length === 0) {
+    throw new Error('No routes found');
+  }
+  return routes[0];
+};

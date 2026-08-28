@@ -1,0 +1,72 @@
+name: Android CD / Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build Android APK & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Make Gradlew Executable
+        run: chmod +x android/gradlew
+
+      - name: Build Android APK
+        run: |
+          if [ "${{ github.event.inputs.build_type }}" = "release" ] || [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "Building Release APK..."
+            cd android && ./gradlew assembleRelease --no-daemon
+          else
+            echo "Building Debug APK..."
+            cd android && ./gradlew assembleDebug --no-daemon
+          fi
+        env:
+          EXPO_PUBLIC_GEMINI_API_KEY: ${{ secrets.EXPO_PUBLIC_GEMINI_API_KEY || 'mock_gemini_key_for_ci' }}
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weatherwise-android-apk
+          path: android/app/build/outputs/apk/**/*.apk
+
+      - name: Create GitHub Release (On Version Tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android/app/build/outputs/apk/**/*.apk
+          generate_release_notes: true
