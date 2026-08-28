@@ -146,6 +146,52 @@ This repository is configured with **GitHub Actions** for continuous integration
 
 ---
 
+## Git Workflow & Linear History Guidelines
+
+To maintain a clean, readable commit graph without unnecessary merge bubbles, this repository follows a **linear history (rebase)** workflow.
+
+### 1. Clone the Repository & Configure Rebase
+```bash
+# Clone the repository and enter the directory
+git clone https://github.com/bagalmarclester/WeatherWise.git
+cd WeatherWise
+
+# Configure local Git to automatically rebase on pull (one-time setup)
+git config pull.rebase true
+git config rebase.autoStash true
+```
+
+### 2. Create and Switch to a Feature Branch
+Always create a dedicated feature branch before making any changes:
+```bash
+git checkout -b feature/your-feature-name
+```
+
+### 3. Stage and Commit Changes
+Make your changes, then stage and commit:
+```bash
+git add .
+git commit -m "feat: descriptive commit message"
+```
+
+### 4. Sync with Master via Rebase & Push
+Keep your branch history linear by rebasing on top of the latest upstream changes before pushing:
+```bash
+# Fetch latest master updates and rebase your branch on top
+git fetch origin
+git rebase origin/master
+
+# Push your feature branch to GitHub
+git push -u origin feature/your-feature-name
+```
+
+### 5. Merging Pull Requests on GitHub
+When merging Pull Requests on GitHub:
+- Select **"Rebase and merge"** (or **"Squash and merge"**).
+- Avoid standard 3-way merge commits to preserve a clean, single-line commit history.
+
+---
+
 ## Author
 
 - **Bagalmarclester** ([@bagalmarclester](https://github.com/bagalmarclester))
