@@ -125,7 +125,7 @@ npm test
 | `npm run web` | Launches the web preview bundler |
 | `npm run proxy` | Starts the local Express API proxy server (`server/proxy.js`) |
 | `npm run type-check` | Runs `tsc --noEmit` across all TypeScript files |
-| `npm test` | Runs the core automated test suite with `ts-node` |
+| `npm test` | Runs the core automated test suite with `tsx` |
 
 ---
 
