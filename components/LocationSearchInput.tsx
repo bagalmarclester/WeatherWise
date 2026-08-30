@@ -87,7 +87,7 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
 
     setLoading(true);
 
-    const url = `${NOMINATIM_BASE}/search?q=${encodeURIComponent(trimmed)}&format=json&limit=5&countrycodes=ph`;
+    const url = `${NOMINATIM_BASE}/search?q=${encodeURIComponent(trimmed)}&format=json&limit=5`;
 
     try {
       const response = await fetch(url, {

@@ -13,11 +13,11 @@ import { getProxyBaseUrl } from '../../utils/proxyUrl';
 
 const LAST_KNOWN_LOCATION_KEY = 'last_known_location';
 
-const DAVAO_CITY = {
-  latitude: 7.0718,
-  longitude: 125.6134,
-  latitudeDelta: 0.05,
-  longitudeDelta: 0.05,
+const DEFAULT_REGION = {
+  latitude: 14.5995,
+  longitude: 120.9842,
+  latitudeDelta: 0.08,
+  longitudeDelta: 0.08,
 };
 
 const COLORS = {
@@ -120,8 +120,8 @@ export default function MapScreen() {
     } catch (e) {
       console.warn('AsyncStorage read error:', e);
     }
-    console.log('Using absolute fallback: Davao City');
-    return { latitude: DAVAO_CITY.latitude, longitude: DAVAO_CITY.longitude };
+    console.log('Using default fallback location');
+    return { latitude: DEFAULT_REGION.latitude, longitude: DEFAULT_REGION.longitude };
   };
 
   const saveLocationToStorage = async (latitude: number, longitude: number) => {
@@ -321,7 +321,9 @@ export default function MapScreen() {
       <MapView
         ref={mapRef}
         style={styles.map}
-        initialRegion={DAVAO_CITY}
+        initialRegion={DEFAULT_REGION}
+        showsUserLocation={true}
+        showsMyLocationButton={true}
         customMapStyle={mapStyle}
       >
         {allRoutes.map((route, index) => {
