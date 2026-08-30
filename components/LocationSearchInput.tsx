@@ -16,6 +16,8 @@ interface LocationSearchResult {
   display_name: string;
   lat: string;
   lon: string;
+  type?: string;
+  importance?: number;
 }
 
 interface LocationSearchInputProps {
@@ -87,7 +89,11 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
 
     setLoading(true);
 
+<<<<<<< HEAD
     const url = `${NOMINATIM_BASE}/search?q=${encodeURIComponent(trimmed)}&format=json&limit=5`;
+=======
+    const url = `${NOMINATIM_BASE}/search?q=${encodeURIComponent(trimmed)}&format=json&limit=8&addressdetails=1`;
+>>>>>>> acc7a8a (Fix location search weather icons and flight route fallback)
 
     try {
       const response = await fetch(url, {
@@ -97,10 +103,17 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
       if (!response.ok) throw new Error('Search failed');
       const data: LocationSearchResult[] = await response.json();
 
+      const sortedResults = [...data].sort((a, b) => {
+        const aExact = a.display_name.toLowerCase().includes(trimmed.toLowerCase()) ? 1 : 0;
+        const bExact = b.display_name.toLowerCase().includes(trimmed.toLowerCase()) ? 1 : 0;
+        if (aExact !== bExact) return bExact - aExact;
+        return (b.importance ?? 0) - (a.importance ?? 0);
+      });
+
       // Only update UI if this request wasn't aborted
       if (!controller.signal.aborted) {
-        setResults(data);
-        setShowDropdown(data.length > 0);
+        setResults(sortedResults);
+        setShowDropdown(sortedResults.length > 0);
       }
     } catch (error: any) {
       // Silently ignore aborted requests — they are expected
@@ -147,8 +160,10 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
 
     // Clean up display name: Take first 2-3 segments (e.g. "SM Lanang, Davao City")
     const segments = item.display_name.split(',').map(s => s.trim());
-    const cleanLabel = segments.length > 2
-      ? `${segments[0]}, ${segments[1]}`
+    const cleanLabel = segments.length > 3
+      ? `${segments[0]}, ${segments[segments.length - 1]}`
+      : segments.length > 2
+      ? `${segments[0]}, ${segments[1]}, ${segments[2]}`
       : item.display_name;
 
     isEditing.current = false;

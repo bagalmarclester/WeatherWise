@@ -42,6 +42,7 @@ export interface RouteComparison extends RouteSummary {
   totalDurationMinutes: number;
   totalDistanceKm: number;
   extraMinutesVsPrimary: number;
+  travelMode?: 'driving' | 'flight';
   label: string;
 }
 
@@ -134,7 +135,8 @@ export const useWeatherAlerts = () => {
           totalDurationMinutes: route.totalDurationMinutes,
           totalDistanceKm: route.totalDistanceKm,
           extraMinutesVsPrimary: Math.max(0, route.totalDurationMinutes - routes[0].totalDurationMinutes),
-          label: index === 0 ? 'Primary' : `Alternative ${index}`,
+          travelMode: route.travelMode,
+          label: route.travelMode === 'flight' ? 'Flight route' : index === 0 ? 'Primary' : `Alternative ${index}`,
         };
       }));
 
