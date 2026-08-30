@@ -396,9 +396,9 @@ export default function MapScreen() {
           return polylines;
         })}
         
-        {currentComparison?.alerts?.filter(a => a.severity !== 'clear').map((alert, index) => {
+        {currentComparison?.alerts?.map((alert, index) => {
           const emoji = getWeatherEmoji(alert.weatherCode);
-          const markerColor = alert.severity === 'high' ? COLORS.red : COLORS.yellow;
+          const markerColor = alert.severity === 'high' ? COLORS.red : alert.severity === 'moderate' ? COLORS.yellow : COLORS.green;
           return (
             <Marker
               key={`alert-${index}`}
