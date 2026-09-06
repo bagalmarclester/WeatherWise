@@ -1,14 +1,34 @@
 import axios from 'axios';
 import { getProxyBaseUrl } from '../utils/proxyUrl';
+import { formatManeuverInstruction } from '../utils/navigationCalculations';
+
+export { formatManeuverInstruction };
 
 export interface Location {
   lat: number;
   lon: number;
 }
 
+export interface Maneuver {
+  type: string;
+  modifier?: string;
+  location: [number, number]; // [lon, lat]
+  bearing_after?: number;
+  bearing_before?: number;
+}
+
+export interface RouteStep {
+  name: string;
+  instruction: string;
+  distanceMeters: number;
+  durationSeconds: number;
+  maneuver: Maneuver;
+}
+
 export interface RouteLeg {
   distanceKm: number;
   durationMinutes: number;
+  steps?: RouteStep[];
 }
 
 export interface RouteResponse {
@@ -16,6 +36,7 @@ export interface RouteResponse {
   totalDistanceKm: number;
   totalDurationMinutes: number;
   legs: RouteLeg[];
+  steps: RouteStep[];
   travelMode?: 'driving' | 'flight';
 }
 
@@ -65,6 +86,7 @@ const interpolateGreatCircle = (origin: Location, destination: Location, fractio
   };
 };
 
+
 const createFlightRoute = (origin: Location, destination: Location): RouteResponse => {
   const totalDistanceKm = haversineDistanceKm(origin, destination);
   const totalDurationMinutes = (totalDistanceKm / FLIGHT_SPEED_KPH) * 60;
@@ -73,11 +95,45 @@ const createFlightRoute = (origin: Location, destination: Location): RouteRespon
     return interpolateGreatCircle(origin, destination, fraction);
   });
 
+  const steps: RouteStep[] = [
+    {
+      name: 'Airspace Departure',
+      instruction: 'Take off and head towards destination waypoint',
+      distanceMeters: Math.round(totalDistanceKm * 0.1 * 1000),
+      durationSeconds: Math.round(totalDurationMinutes * 0.1 * 60),
+      maneuver: {
+        type: 'depart',
+        location: [origin.lon, origin.lat],
+      },
+    },
+    {
+      name: 'Cruising Altitude',
+      instruction: 'Cruise along great-circle flight trajectory',
+      distanceMeters: Math.round(totalDistanceKm * 0.8 * 1000),
+      durationSeconds: Math.round(totalDurationMinutes * 0.8 * 60),
+      maneuver: {
+        type: 'continue',
+        location: [origin.lon, origin.lat],
+      },
+    },
+    {
+      name: 'Destination Approach',
+      instruction: 'Descend and arrive at destination',
+      distanceMeters: Math.round(totalDistanceKm * 0.1 * 1000),
+      durationSeconds: Math.round(totalDurationMinutes * 0.1 * 60),
+      maneuver: {
+        type: 'arrive',
+        location: [destination.lon, destination.lat],
+      },
+    },
+  ];
+
   return {
     coordinates,
     totalDistanceKm,
     totalDurationMinutes,
-    legs: [{ distanceKm: totalDistanceKm, durationMinutes: totalDurationMinutes }],
+    legs: [{ distanceKm: totalDistanceKm, durationMinutes: totalDurationMinutes, steps }],
+    steps,
     travelMode: 'flight',
   };
 };
@@ -85,7 +141,22 @@ const createFlightRoute = (origin: Location, destination: Location): RouteRespon
 const canFallbackToFlight = (error: any): boolean => {
   const status = error?.response?.status;
   const code = error?.response?.data?.code;
-  return status === 400 || code === 'NoRoute' || code === 'TooBig';
+  const message = error?.message || '';
+  const isNetworkOrTimeout =
+    message.includes('Network Error') ||
+    error?.code === 'ECONNABORTED' ||
+    error?.code === 'ERR_NETWORK' ||
+    !error?.response;
+
+  return (
+    status === 400 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    code === 'NoRoute' ||
+    code === 'TooBig' ||
+    isNetworkOrTimeout
+  );
 };
 
 /**
@@ -104,34 +175,90 @@ export const fetchAlternativeRoutes = async (
   const lon2 = Number(destination.lon);
   const lat2 = Number(destination.lat);
 
-  const url = `${OSRM_BASE}/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&alternatives=true`;
+  const url = `${OSRM_BASE}/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&alternatives=true&steps=true`;
 
   try {
     console.log('[OSRM] Fetching:', url);
-    const { data } = await axios.get(url, { timeout: 30000 });
+    let data: any;
+    try {
+      const res = await axios.get(url, { timeout: 15000 });
+      data = res.data;
+    } catch (proxyErr: any) {
+      console.warn('[OSRM] Local proxy failed or timed out, querying HTTPS OSM routing server directly...');
+      try {
+        const httpsUrl = `https://routing.openstreetmap.de/routed-car/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&steps=true`;
+        const resp = await fetch(httpsUrl, {
+          headers: {
+            'User-Agent': 'WeatherWiseApp/1.0',
+            'Accept': 'application/json',
+          },
+        });
+        if (!resp.ok) throw new Error(`HTTPS OSM routing returned HTTP ${resp.status}`);
+        data = await resp.json();
+      } catch (httpsErr: any) {
+        console.warn('[OSRM] HTTPS OSM query failed, trying plain OSRM server...');
+        const directUrl = `http://router.project-osrm.org/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&alternatives=false&steps=true`;
+        const resp = await fetch(directUrl, {
+          headers: {
+            'User-Agent': 'WeatherWiseApp/1.0',
+            'Accept': 'application/json',
+          },
+        });
+        if (!resp.ok) throw new Error(`Direct OSRM returned HTTP ${resp.status}`);
+        data = await resp.json();
+      }
+    }
 
     console.log(`[OSRM] Received ${data.routes?.length || 0} routes`);
     if (data.code !== 'Ok' || !data.routes) throw new Error('No routes found');
 
-    return data.routes.map((route: any) => ({
-      coordinates: route.geometry.coordinates.map(([lon, lat]: [number, number]) => ({ lat, lon })),
-      totalDistanceKm: route.distance / 1000,
-      totalDurationMinutes: route.duration / 60,
-      travelMode: 'driving',
-      legs: route.legs.map((leg: any) => ({
-        distanceKm: leg.distance / 1000,
-        durationMinutes: leg.duration / 60,
-      })),
-    }));
+    return data.routes.map((route: any) => {
+      const allSteps: RouteStep[] = [];
+      const legs: RouteLeg[] = (route.legs || []).map((leg: any) => {
+        const legSteps: RouteStep[] = (leg.steps || []).map((step: any) => {
+          const m = step.maneuver || {};
+          const instruction = formatManeuverInstruction(m.type, m.modifier, step.name);
+          const parsedStep: RouteStep = {
+            name: step.name || '',
+            instruction,
+            distanceMeters: step.distance || 0,
+            durationSeconds: step.duration || 0,
+            maneuver: {
+              type: m.type || 'turn',
+              modifier: m.modifier,
+              location: m.location || [0, 0],
+              bearing_after: m.bearing_after,
+              bearing_before: m.bearing_before,
+            },
+          };
+          allSteps.push(parsedStep);
+          return parsedStep;
+        });
+
+        return {
+          distanceKm: leg.distance / 1000,
+          durationMinutes: leg.duration / 60,
+          steps: legSteps,
+        };
+      });
+
+      return {
+        coordinates: route.geometry.coordinates.map(([lon, lat]: [number, number]) => ({ lat, lon })),
+        totalDistanceKm: route.distance / 1000,
+        totalDurationMinutes: route.duration / 60,
+        travelMode: 'driving',
+        legs,
+        steps: allSteps,
+      };
+    });
   } catch (error: any) {
-    if (axios.isCancel(error) || error.code === 'ECONNABORTED') {
-      console.warn('[OSRM] Route request timed out');
-      throw new Error('Routing request timed out. Please check your connection.');
-    }
     console.warn('[OSRM] Failed to fetch alternative routes:', error.message);
     if (canFallbackToFlight(error)) {
       console.warn('[OSRM] Falling back to estimated flight route.');
       return [createFlightRoute(origin, destination)];
+    }
+    if (axios.isCancel(error) || error.code === 'ECONNABORTED') {
+      throw new Error('Routing request timed out. Please check your connection.');
     }
     throw error;
   }

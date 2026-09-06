@@ -4,12 +4,21 @@ import MapView, { Polyline, Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { BlurView } from 'expo-blur';
 import { Text, Divider } from 'react-native-paper';
-import { fetchAlternativeRoutes } from '../../services/osrm';
+import { fetchAlternativeRoutes, RouteStep } from '../../services/osrm';
 import { useWeatherAlerts } from '../../hooks/useWeatherAlerts';
 import { LocationSearchInput } from '../../components/LocationSearchInput';
 import { useWeatherStore } from '../../store/useWeatherStore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getProxyBaseUrl } from '../../utils/proxyUrl';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { NavigationHUD } from '../../components/NavigationHUD';
+import {
+  calculateBearing,
+  haversineDistanceMeters,
+  findUpcomingHazard,
+  speakGuidance,
+  formatWeatherWarningSpeech,
+} from '../../services/navigation';
 
 const LAST_KNOWN_LOCATION_KEY = 'last_known_location';
 
@@ -89,14 +98,118 @@ export default function MapScreen() {
   const { isAnalyzing, compareRoutes, selectRoute, summary } = useWeatherAlerts();
   const mapRef = useRef<MapView>(null);
 
+  // Navigation Mode States
+  const [isNavigating, setIsNavigating] = useState(false);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simulationSpeed, setSimulationSpeed] = useState(1);
+  const [driverCoord, setDriverCoord] = useState<{ lat: number; lon: number } | null>(null);
+  const [driverHeading, setDriverHeading] = useState(0);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const [simulatedCoordIndex, setSimulatedCoordIndex] = useState(0);
+  const [isMuted, setIsMuted] = useState(false);
+  const [currentSpeedKph, setCurrentSpeedKph] = useState(45);
+
+  const simulationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const locationSubscriptionRef = useRef<Location.LocationSubscription | null>(null);
+  const lastWarnedHazardKeyRef = useRef<string>('');
+
+  const animateMapToDriver = (coord: { lat: number; lon: number }, heading: number, duration = 600) => {
+    if (mapRef.current) {
+      if (typeof (mapRef.current as any).animateCamera === 'function') {
+        (mapRef.current as any).animateCamera(
+          {
+            center: { latitude: coord.lat, longitude: coord.lon },
+            pitch: 50,
+            heading,
+            zoom: 18,
+          },
+          { duration }
+        );
+      } else {
+        mapRef.current.animateToRegion({
+          latitude: coord.lat,
+          longitude: coord.lon,
+          latitudeDelta: 0.008,
+          longitudeDelta: 0.008,
+        });
+      }
+    }
+  };
+
+  const handleStartNavigation = () => {
+    const activeRoute = allRoutes[selectedRouteIndex];
+    if (!activeRoute || !activeRoute.coordinates || activeRoute.coordinates.length === 0) {
+      Alert.alert('No Route', 'Please calculate routes before starting navigation.');
+      return;
+    }
+
+    const startCoord = activeRoute.coordinates[0];
+    const initialHeading = activeRoute.coordinates.length > 1
+      ? calculateBearing(startCoord, activeRoute.coordinates[1])
+      : 0;
+
+    lastWarnedHazardKeyRef.current = '';
+    setIsNavigating(true);
+    setIsSimulating(false);
+    setDriverCoord(startCoord);
+    setDriverHeading(initialHeading);
+    setCurrentStepIndex(0);
+    setSimulatedCoordIndex(0);
+    setCurrentSpeedKph(activeRoute.travelMode === 'flight' ? 850 : 45);
+
+    animateMapToDriver(startCoord, initialHeading, 1000);
+
+    const firstStep = activeRoute.steps && activeRoute.steps.length > 0 ? activeRoute.steps[0] : null;
+    if (firstStep) {
+      speakGuidance(firstStep.instruction, isMuted);
+    }
+  };
+
+  const handleExitNavigation = () => {
+    lastWarnedHazardKeyRef.current = '';
+    setIsNavigating(false);
+    setIsSimulating(false);
+    if (simulationIntervalRef.current) {
+      clearInterval(simulationIntervalRef.current);
+      simulationIntervalRef.current = null;
+    }
+    if (locationSubscriptionRef.current) {
+      locationSubscriptionRef.current.remove();
+      locationSubscriptionRef.current = null;
+    }
+
+    if (allRoutes[selectedRouteIndex]) {
+      const points = allRoutes[selectedRouteIndex].coordinates.map((p: any) => ({
+        latitude: p.lat,
+        longitude: p.lon,
+      }));
+      if (typeof (mapRef.current as any)?.animateCamera === 'function') {
+        (mapRef.current as any).animateCamera({ pitch: 0, heading: 0 });
+      }
+      mapRef.current?.fitToCoordinates(points, {
+        edgePadding: { top: 100, right: 100, bottom: 300, left: 100 },
+        animated: true,
+      });
+    }
+  };
+
+  const handleRecenterCamera = () => {
+    if (!driverCoord) return;
+    animateMapToDriver(driverCoord, driverHeading, 600);
+  };
+
   const clearRouteState = () => {
+    if (isNavigating) {
+      handleExitNavigation();
+    }
     setAllRoutes([]);
     clearStoreState();
     setLoadingState('');
   };
 
-  // Smoothly focus on the route whenever the selection changes
+  // Smoothly focus on the route whenever the selection changes (only when not navigating)
   useEffect(() => {
+    if (isNavigating) return;
     if (allRoutes.length > 0 && allRoutes[selectedRouteIndex]) {
       const points = allRoutes[selectedRouteIndex].coordinates.map((p: any) => ({ 
         latitude: p.lat, 
@@ -108,7 +221,161 @@ export default function MapScreen() {
         animated: true,
       });
     }
-  }, [selectedRouteIndex, allRoutes]);
+  }, [selectedRouteIndex, allRoutes, isNavigating]);
+
+  // Simulation Loop
+  useEffect(() => {
+    if (!isNavigating || !isSimulating) {
+      if (simulationIntervalRef.current) {
+        clearInterval(simulationIntervalRef.current);
+        simulationIntervalRef.current = null;
+      }
+      return;
+    }
+
+    const activeRoute = allRoutes[selectedRouteIndex];
+    if (!activeRoute || !activeRoute.coordinates || activeRoute.coordinates.length === 0) return;
+
+    const coords = activeRoute.coordinates;
+    const steps: RouteStep[] = activeRoute.steps || [];
+    const intervalMs = Math.max(150, Math.round(700 / simulationSpeed));
+
+    simulationIntervalRef.current = setInterval(() => {
+      setSimulatedCoordIndex((prevIndex) => {
+        const nextIndex = prevIndex + 1;
+        if (nextIndex >= coords.length) {
+          speakGuidance('You have reached your destination.', isMuted);
+          setIsSimulating(false);
+          return prevIndex;
+        }
+
+        const currentPt = coords[nextIndex];
+        const nextPt = nextIndex + 1 < coords.length ? coords[nextIndex + 1] : currentPt;
+        const heading = calculateBearing(currentPt, nextPt);
+
+        setDriverCoord(currentPt);
+        setDriverHeading(heading);
+        animateMapToDriver(currentPt, heading, intervalMs);
+
+        // Advance step if close to next maneuver
+        setCurrentStepIndex((stepIdx) => {
+          if (stepIdx < steps.length) {
+            const maneuverLoc = steps[stepIdx].maneuver?.location;
+            if (maneuverLoc) {
+              const dist = haversineDistanceMeters(currentPt, { lat: maneuverLoc[1], lon: maneuverLoc[0] });
+              if (dist < 50 && stepIdx + 1 < steps.length) {
+                const nextManeuver = steps[stepIdx + 1];
+                speakGuidance(nextManeuver.instruction, isMuted);
+                return stepIdx + 1;
+              }
+            }
+          }
+          return stepIdx;
+        });
+
+        return nextIndex;
+      });
+    }, intervalMs);
+
+    return () => {
+      if (simulationIntervalRef.current) {
+        clearInterval(simulationIntervalRef.current);
+      }
+    };
+  }, [isNavigating, isSimulating, simulationSpeed, selectedRouteIndex, allRoutes, isMuted]);
+
+  // Live GPS tracking when not simulating
+  useEffect(() => {
+    if (!isNavigating || isSimulating) {
+      if (locationSubscriptionRef.current) {
+        locationSubscriptionRef.current.remove();
+        locationSubscriptionRef.current = null;
+      }
+      return;
+    }
+
+    const activeRoute = allRoutes[selectedRouteIndex];
+    if (!activeRoute) return;
+    const steps: RouteStep[] = activeRoute.steps || [];
+
+    let isMounted = true;
+    (async () => {
+      try {
+        const sub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.High,
+            timeInterval: 1000,
+            distanceInterval: 5,
+          },
+          (loc) => {
+            if (!isMounted) return;
+            const newCoord = { lat: loc.coords.latitude, lon: loc.coords.longitude };
+            const heading = loc.coords.heading ?? driverHeading;
+
+            setDriverCoord(newCoord);
+            if (loc.coords.heading !== null && loc.coords.heading !== undefined) {
+              setDriverHeading(loc.coords.heading);
+            }
+            if (loc.coords.speed !== null && loc.coords.speed !== undefined && loc.coords.speed > 0) {
+              setCurrentSpeedKph(loc.coords.speed * 3.6);
+            }
+
+            animateMapToDriver(newCoord, heading, 600);
+
+            setCurrentStepIndex((stepIdx) => {
+              if (stepIdx < steps.length) {
+                const maneuverLoc = steps[stepIdx].maneuver?.location;
+                if (maneuverLoc) {
+                  const dist = haversineDistanceMeters(newCoord, { lat: maneuverLoc[1], lon: maneuverLoc[0] });
+                  if (dist < 40 && stepIdx + 1 < steps.length) {
+                    const nextManeuver = steps[stepIdx + 1];
+                    speakGuidance(nextManeuver.instruction, isMuted);
+                    return stepIdx + 1;
+                  }
+                }
+              }
+              return stepIdx;
+            });
+          }
+        );
+        locationSubscriptionRef.current = sub;
+      } catch (e) {
+        console.warn('Live location watch failed:', e);
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+      if (locationSubscriptionRef.current) {
+        locationSubscriptionRef.current.remove();
+        locationSubscriptionRef.current = null;
+      }
+    };
+  }, [isNavigating, isSimulating, selectedRouteIndex, allRoutes, isMuted]);
+
+  // Clean up timers on unmount
+  useEffect(() => {
+    return () => {
+      if (simulationIntervalRef.current) clearInterval(simulationIntervalRef.current);
+      if (locationSubscriptionRef.current) locationSubscriptionRef.current.remove();
+    };
+  }, []);
+
+  // Periodic weather refresh during active driving (every 10 minutes)
+  useEffect(() => {
+    if (!isNavigating || allRoutes.length === 0) return;
+
+    const refreshInterval = setInterval(async () => {
+      console.log('[Navigation] Running periodic 10-minute weather update for route...');
+      try {
+        await compareRoutes(allRoutes);
+      } catch (err: any) {
+        console.warn('[Navigation] Periodic weather refresh failed:', err.message);
+      }
+    }, 10 * 60 * 1000);
+
+    return () => clearInterval(refreshInterval);
+  }, [isNavigating, allRoutes]);
 
   const getFallbackLocation = async () => {
     try {
@@ -252,9 +519,18 @@ export default function MapScreen() {
       // 4b. Reverse-geocode the best available coords into an address
       let resolvedLabel = 'Current Location';
       try {
-        const response = await fetch(
-          `${NOMINATIM_BASE}/reverse?lat=${refinedLat}&lon=${refinedLon}&format=json`
-        );
+        let response: Response;
+        try {
+          response = await fetch(
+            `${NOMINATIM_BASE}/reverse?lat=${refinedLat}&lon=${refinedLon}&format=json`
+          );
+          if (!response.ok) throw new Error('Proxy reverse failed');
+        } catch {
+          const directUrl = `https://nominatim.openstreetmap.org/reverse?lat=${refinedLat}&lon=${refinedLon}&format=json`;
+          response = await fetch(directUrl, {
+            headers: { 'User-Agent': 'WeatherWiseApp/1.0' },
+          });
+        }
 
         const data = await response.json();
         if (data.display_name) {
@@ -316,14 +592,55 @@ export default function MapScreen() {
   const currentRoute = allRoutes[selectedRouteIndex];
   const currentComparison = comparisons.find(c => c.routeIndex === selectedRouteIndex);
 
+  const currentStep = currentRoute?.steps && currentRoute.steps[currentStepIndex]
+    ? currentRoute.steps[currentStepIndex]
+    : null;
+  const nextStep = currentRoute?.steps && currentRoute.steps[currentStepIndex + 1]
+    ? currentRoute.steps[currentStepIndex + 1]
+    : null;
+
+  const distanceToNextStepMeters = driverCoord && currentStep
+    ? haversineDistanceMeters(driverCoord, {
+        lat: currentStep.maneuver?.location ? currentStep.maneuver.location[1] : driverCoord.lat,
+        lon: currentStep.maneuver?.location ? currentStep.maneuver.location[0] : driverCoord.lon,
+      })
+    : (currentStep?.distanceMeters ?? 0);
+
+  const totalCoords = currentRoute?.coordinates?.length || 1;
+  const progressRatio = Math.min(1, simulatedCoordIndex / totalCoords);
+  const remainingDistanceKm = Math.max(0, (currentRoute?.totalDistanceKm || 0) * (1 - progressRatio));
+  const remainingDurationMinutes = Math.max(0, (currentRoute?.totalDurationMinutes || 0) * (1 - progressRatio));
+
+  const upcomingHazard = driverCoord
+    ? findUpcomingHazard(driverCoord, currentComparison?.alerts || [])
+    : null;
+
+  // Spoken voice warning alert when approaching a weather hazard
+  useEffect(() => {
+    if (!isNavigating || !upcomingHazard || isMuted) return;
+
+    const hazardAlert = upcomingHazard.alert;
+    const hazardKey = `${hazardAlert.segmentIndex ?? hazardAlert.waypointIndex ?? hazardAlert.label}_${hazardAlert.severity}`;
+
+    if (upcomingHazard.distanceKm <= 20 && lastWarnedHazardKeyRef.current !== hazardKey) {
+      lastWarnedHazardKeyRef.current = hazardKey;
+      const warningSpeech = formatWeatherWarningSpeech(
+        hazardAlert.label,
+        upcomingHazard.distanceKm,
+        hazardAlert.severity
+      );
+      speakGuidance(warningSpeech, isMuted);
+    }
+  }, [isNavigating, upcomingHazard, isMuted]);
+
   return (
     <View style={styles.container}>
       <MapView
         ref={mapRef}
         style={styles.map}
         initialRegion={DEFAULT_REGION}
-        showsUserLocation={true}
-        showsMyLocationButton={true}
+        showsUserLocation={!isNavigating}
+        showsMyLocationButton={!isNavigating}
         customMapStyle={mapStyle}
       >
         {allRoutes.map((route, index) => {
@@ -413,80 +730,119 @@ export default function MapScreen() {
           );
         })}
 
-        {userLocation && (
+        {/* User Location Marker when not navigating */}
+        {!isNavigating && userLocation && (
           <Marker
             coordinate={{ latitude: userLocation.coords.latitude, longitude: userLocation.coords.longitude }}
             title="You"
             pinColor={COLORS.electricBlue}
           />
         )}
+
+        {/* Active Driver Navigation Marker */}
+        {isNavigating && driverCoord && (
+          <Marker
+            coordinate={{ latitude: driverCoord.lat, longitude: driverCoord.lon }}
+            anchor={{ x: 0.5, y: 0.5 }}
+            flat
+            rotation={driverHeading}
+            zIndex={999}
+          >
+            <View style={styles.navVehicleContainer}>
+              <View style={styles.navVehiclePulse} />
+              <View style={styles.navVehicleIcon}>
+                <MaterialCommunityIcons name="navigation" size={22} color={COLORS.white} />
+              </View>
+            </View>
+          </Marker>
+        )}
       </MapView>
 
-      <View style={styles.inputWrapper}>
-        <BlurView intensity={80} tint="dark" style={styles.blurContainer}>
-          <View style={styles.inputContainer}>
-            <LocationSearchInput
-              label="Origin"
-              placeholder="Search start location..."
-              value={origin?.label || ''}
-              onSelect={(lat, lon, label) => {
-                clearRouteState();
-                setOrigin({ lat, lon, label });
-              }}
-              onClear={() => {
-                clearRouteState();
-                setOrigin(null);
-              }}
-              showCurrentLocationButton={true}
-              onCurrentLocationPress={handleUseCurrentLocation}
-            />
-            <Divider style={styles.divider} />
-            <LocationSearchInput
-              label="Destination"
-              placeholder="Search destination..."
-              value={destination?.label || ''}
-              onSelect={(lat, lon, label) => {
-                clearRouteState();
-                setDestination({ lat, lon, label });
-              }}
-              onClear={() => {
-                clearRouteState();
-                setDestination(null);
-              }}
-            />
-            <TouchableOpacity style={styles.button} onPress={handleGetRoute} disabled={!!loadingState || isAnalyzing}>
-              {loadingState || isAnalyzing ? (
-                <Text style={styles.buttonText}>{loadingState || 'Analyzing...'}</Text>
-              ) : (
-                <Text style={styles.buttonText}>Compare Routes</Text>
+      {/* INPUT SEARCH PANEL (Hidden during Navigation) */}
+      {!isNavigating && (
+        <View style={styles.inputWrapper}>
+          <BlurView intensity={80} tint="dark" style={styles.blurContainer}>
+            <View style={styles.inputContainer}>
+              <LocationSearchInput
+                label="Origin"
+                placeholder="Search start location..."
+                value={origin?.label || ''}
+                onSelect={(lat, lon, label) => {
+                  clearRouteState();
+                  setOrigin({ lat, lon, label });
+                }}
+                onClear={() => {
+                  clearRouteState();
+                  setOrigin(null);
+                }}
+                showCurrentLocationButton={true}
+                onCurrentLocationPress={handleUseCurrentLocation}
+              />
+              <Divider style={styles.divider} />
+              <LocationSearchInput
+                label="Destination"
+                placeholder="Search destination..."
+                value={destination?.label || ''}
+                onSelect={(lat, lon, label) => {
+                  clearRouteState();
+                  setDestination({ lat, lon, label });
+                }}
+                onClear={() => {
+                  clearRouteState();
+                  setDestination(null);
+                }}
+              />
+              <TouchableOpacity style={styles.button} onPress={handleGetRoute} disabled={!!loadingState || isAnalyzing}>
+                {loadingState || isAnalyzing ? (
+                  <Text style={styles.buttonText}>{loadingState || 'Analyzing...'}</Text>
+                ) : (
+                  <Text style={styles.buttonText}>Compare Routes</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </BlurView>
+          
+          {/* Dynamic Summary Banner */}
+          {summary && (
+            <TouchableOpacity 
+              style={[
+                styles.summaryBanner,
+                { backgroundColor: summary.overallRisk === 'high' ? COLORS.red : summary.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green }
+              ]}
+              onPress={handleStartNavigation}
+              activeOpacity={0.8}
+            >
+              {summary.overallRisk === 'clear' && (
+                <Text style={styles.summaryText}>✅ Route clear · Tap to Start Drive</Text>
+              )}
+              {summary.overallRisk === 'moderate' && (
+                <Text style={styles.summaryText}>⚠ Rain possible · Tap to Start Drive</Text>
+              )}
+              {summary.overallRisk === 'high' && (
+                <Text style={styles.summaryText}>
+                  ⛈ {summary.firstHazardLabel} in {summary.firstHazardMinutes} min · Tap to Start Drive
+                </Text>
               )}
             </TouchableOpacity>
-          </View>
-        </BlurView>
-        
-        {/* Dynamic Summary Banner */}
-        {summary && (
-          <TouchableOpacity 
-            style={[
-              styles.summaryBanner,
-              { backgroundColor: summary.overallRisk === 'high' ? COLORS.red : summary.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green }
-            ]}
-          >
-            {summary.overallRisk === 'clear' && <Text style={styles.summaryText}>✅ Route looks clear all the way</Text>}
-            {summary.overallRisk === 'moderate' && <Text style={styles.summaryText}>⚠ Some rain possible — see timeline</Text>}
-            {summary.overallRisk === 'high' && (
-              <Text style={styles.summaryText}>
-                ⛈ {summary.firstHazardLabel} in {summary.firstHazardMinutes} min · Tap for alternatives
-              </Text>
-            )}
-          </TouchableOpacity>
-        )}
-      </View>
+          )}
+        </View>
+      )}
 
-      {comparisons?.length > 0 && (
+      {/* ROUTE COMPARISON BOTTOM SHEET (Hidden during Navigation) */}
+      {!isNavigating && comparisons?.length > 0 && (
         <View style={styles.bottomSheet}>
           <BlurView intensity={95} tint="dark" style={styles.bottomBlur}>
-            <Text style={styles.sheetTitle}>Choose Safest Route</Text>
+            <View style={styles.sheetHeaderRow}>
+              <Text style={styles.sheetTitle}>Choose Safest Route</Text>
+              <TouchableOpacity
+                style={styles.startNavActionBtn}
+                onPress={handleStartNavigation}
+                activeOpacity={0.8}
+              >
+                <MaterialCommunityIcons name="navigation" size={16} color={COLORS.white} />
+                <Text style={styles.startNavActionText}>Start Drive</Text>
+              </TouchableOpacity>
+            </View>
             <ScrollView 
               horizontal 
               showsHorizontalScrollIndicator={false} 
@@ -527,12 +883,45 @@ export default function MapScreen() {
                     {comp.overallRisk === 'clear' && comp.extraMinutesVsPrimary > 0 && (
                       <Text style={styles.recommendation}>✅ Recommended</Text>
                     )}
+
+                    {isSelected && (
+                      <TouchableOpacity
+                        style={styles.cardStartBtn}
+                        onPress={handleStartNavigation}
+                        activeOpacity={0.8}
+                      >
+                        <MaterialCommunityIcons name="navigation" size={13} color={COLORS.white} />
+                        <Text style={styles.cardStartBtnText}>Start Drive</Text>
+                      </TouchableOpacity>
+                    )}
                   </TouchableOpacity>
                 );
               })}
             </ScrollView>
           </BlurView>
         </View>
+      )}
+
+      {/* ACTIVE NAVIGATION HUD */}
+      {isNavigating && (
+        <NavigationHUD
+          currentStep={currentStep}
+          nextStep={nextStep}
+          distanceToNextStepMeters={distanceToNextStepMeters}
+          remainingDurationMinutes={remainingDurationMinutes}
+          remainingDistanceKm={remainingDistanceKm}
+          currentSpeedKph={currentSpeedKph}
+          upcomingHazard={upcomingHazard}
+          isSimulating={isSimulating}
+          simulationSpeed={simulationSpeed}
+          isMuted={isMuted}
+          travelMode={currentRoute?.travelMode}
+          onToggleSimulate={() => setIsSimulating(!isSimulating)}
+          onChangeSimSpeed={(spd) => setSimulationSpeed(spd)}
+          onToggleMute={() => setIsMuted(!isMuted)}
+          onRecenter={handleRecenterCamera}
+          onExitNavigation={handleExitNavigation}
+        />
       )}
     </View>
   );
@@ -549,7 +938,22 @@ const styles = StyleSheet.create({
   buttonText: { color: COLORS.white, fontSize: 16, fontWeight: '700' },
   bottomSheet: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 260 },
   bottomBlur: { flex: 1, padding: 20, borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden' },
-  sheetTitle: { color: '#fff', fontSize: 18, fontWeight: '800', marginBottom: 15 },
+  sheetHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  sheetTitle: { color: '#fff', fontSize: 18, fontWeight: '800' },
+  startNavActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.electricBlue,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    shadowColor: COLORS.electricBlue,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  startNavActionText: { color: COLORS.white, fontWeight: '800', fontSize: 13, marginLeft: 4 },
   comparisonScroll: { paddingRight: 20 },
   comparisonCard: { backgroundColor: 'rgba(255,255,255,0.05)', width: 160, borderRadius: 16, padding: 15, marginRight: 12, borderWidth: 1 },
   activeCard: { backgroundColor: 'rgba(59, 130, 246, 0.1)', borderWidth: 2 },
@@ -561,7 +965,35 @@ const styles = StyleSheet.create({
   distanceText: { color: COLORS.gray, fontSize: 13, marginBottom: 8 },
   extraText: { color: COLORS.yellow, fontSize: 11, fontWeight: '600' },
   recommendation: { color: COLORS.green, fontSize: 11, fontWeight: '700', marginTop: 4 },
+  cardStartBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.electricBlue,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    marginTop: 6,
+    alignSelf: 'flex-start',
+  },
+  cardStartBtnText: { color: COLORS.white, fontSize: 11, fontWeight: '800', marginLeft: 4 },
   alertMarker: { alignItems: 'center' },
   summaryBanner: { marginTop: 8, padding: 12, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   summaryText: { color: COLORS.navy, fontWeight: '800', fontSize: 14 },
+  navVehicleContainer: { width: 48, height: 48, justifyContent: 'center', alignItems: 'center' },
+  navVehiclePulse: { position: 'absolute', width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(59, 130, 246, 0.3)' },
+  navVehicleIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: COLORS.electricBlue,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: COLORS.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
 });

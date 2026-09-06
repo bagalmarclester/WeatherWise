@@ -9,7 +9,8 @@
  */
 
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+const cors = require('cors');
+const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -37,76 +38,122 @@ try {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Enable CORS for all origins (Expo Web, physical devices, local development)
+app.use(cors());
+
 // Enable large payload parsing for base64 audio uploads
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 console.log('Starting API proxy server...');
 
-// Proxy OSRM requests
-app.use(
-  '/osrm',
-  createProxyMiddleware({
-    target: 'https://router.project-osrm.org',
-    changeOrigin: true,
-    pathRewrite: { '^/osrm': '' },
-    proxyTimeout: 8000,
-    timeout: 8000,
-    on: {
-      proxyReq: (proxyReq, req, res) => {
-        console.log(`[OSRM Proxy] ${req.method} ${req.url} → https://router.project-osrm.org${req.url.replace('/osrm', '')}`);
+// Proxy OSRM requests (use direct axios with HTTP to prevent socket drops and HTTPS timeouts)
+app.use('/osrm', async (req, res) => {
+  const targetPath = req.url;
+  const targetUrl = `http://router.project-osrm.org${targetPath}`;
+  console.log(`[OSRM Proxy] ${req.method} ${req.url} → ${targetUrl}`);
+
+  try {
+    const response = await axios({
+      method: req.method,
+      url: targetUrl,
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'WeatherWiseApp/1.0',
+        'Accept': 'application/json',
       },
-      error: (err, req, res) => {
-        console.error('[OSRM Proxy Error]', err.message);
-        res.status(502).json({ error: 'OSRM proxy failed', details: err.message });
-      },
+    });
+    return res.status(response.status).json(response.data);
+  } catch (err) {
+    console.warn('[OSRM Proxy Primary Error]', err.message);
+
+    // If alternatives=true timed out or failed, immediately retry with alternatives=false
+    // The public OSRM demo server frequently throttles complex multi-route queries, but primary routes return in < 1s!
+    if (targetUrl.includes('alternatives=true')) {
+      const fallbackUrl = targetUrl.replace('alternatives=true', 'alternatives=false');
+      console.log(`[OSRM Proxy] Retrying without alternatives → ${fallbackUrl}`);
+      try {
+        const fallbackRes = await axios({
+          method: req.method,
+          url: fallbackUrl,
+          timeout: 10000,
+          headers: {
+            'User-Agent': 'WeatherWiseApp/1.0',
+            'Accept': 'application/json',
+          },
+        });
+        return res.status(fallbackRes.status).json(fallbackRes.data);
+      } catch (fallbackErr) {
+        console.error('[OSRM Proxy Fallback Error]', fallbackErr.message);
+      }
     }
-  })
-);
+
+    if (err.response) {
+      return res.status(err.response.status).json(err.response.data);
+    }
+    res.status(502).json({
+      error: 'OSRM routing failed',
+      code: 'NoRoute',
+      message: err.message,
+    });
+  }
+});
 
 // Proxy Open-Meteo requests
-app.use(
-  '/weather',
-  createProxyMiddleware({
-    target: 'https://api.open-meteo.com/v1/forecast',
-    changeOrigin: true,
-    pathRewrite: { '^/weather': '' },
-    proxyTimeout: 8000,
-    timeout: 8000,
-    on: {
-      proxyReq: (proxyReq, req, res) => {
-        console.log(`[Weather Proxy] ${req.method} ${req.url} → https://api.open-meteo.com/v1/forecast${req.url.replace('/weather', '')}`);
+app.use('/weather', async (req, res) => {
+  const targetUrl = `https://api.open-meteo.com/v1/forecast${req.url}`;
+  console.log(`[Weather Proxy] ${req.method} ${req.url} → ${targetUrl}`);
+
+  try {
+    const response = await axios({
+      method: req.method,
+      url: targetUrl,
+      timeout: 20000,
+      headers: {
+        'User-Agent': 'WeatherWiseApp/1.0',
+        'Accept': 'application/json',
       },
-      error: (err, req, res) => {
-        console.error('[Weather Proxy Error]', err.message);
-        res.status(502).json({ error: 'Weather proxy failed', details: err.message });
-      },
+    });
+    res.status(response.status).json(response.data);
+  } catch (err) {
+    console.error('[Weather Proxy Error]', err.message);
+    if (err.response) {
+      return res.status(err.response.status).json(err.response.data);
     }
-  })
-);
+    res.status(502).json({
+      error: 'Weather fetch failed',
+      message: err.message,
+    });
+  }
+});
 
 // Proxy Nominatim requests
-app.use(
-  '/nominatim',
-  createProxyMiddleware({
-    target: 'https://nominatim.openstreetmap.org',
-    changeOrigin: true,
-    pathRewrite: { '^/nominatim': '' },
-    proxyTimeout: 8000,
-    timeout: 8000,
-    on: {
-      proxyReq: (proxyReq, req, res) => {
-        // Nominatim requires a User-Agent
-        proxyReq.setHeader('User-Agent', 'WeatherWiseApp/1.0');
-        console.log(`[Nominatim Proxy] ${req.method} ${req.url} → https://nominatim.openstreetmap.org${req.url.replace('/nominatim', '')}`);
+app.use('/nominatim', async (req, res) => {
+  const targetUrl = `https://nominatim.openstreetmap.org${req.url}`;
+  console.log(`[Nominatim Proxy] ${req.method} ${req.url} → ${targetUrl}`);
+
+  try {
+    const response = await axios({
+      method: req.method,
+      url: targetUrl,
+      timeout: 15000,
+      headers: {
+        'User-Agent': 'WeatherWiseApp/1.0 (contact@weatherwise.local)',
+        'Accept': 'application/json',
       },
-      error: (err, req, res) => {
-        console.error('[Nominatim Proxy Error]', err.message);
-        res.status(502).json({ error: 'Nominatim proxy failed', details: err.message });
-      },
+    });
+    res.status(response.status).json(response.data);
+  } catch (err) {
+    console.error('[Nominatim Proxy Error]', err.message);
+    if (err.response) {
+      return res.status(err.response.status).json(err.response.data);
     }
-  })
-);
+    res.status(502).json({
+      error: 'Nominatim geocoding failed',
+      message: err.message,
+    });
+  }
+});
 
 // AI Assistant Endpoint routed through local laptop
 app.post('/api/ai', async (req, res) => {

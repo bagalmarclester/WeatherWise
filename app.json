@@ -24,7 +24,8 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.weatherwise"
+      "package": "com.anonymous.weatherwise",
+      "usesCleartextTraffic": true
     },
     "web": {
       "bundler": "metro",
@@ -40,7 +41,8 @@
           "color": "#3B82F6",
           "defaultChannel": "rain-alerts"
         }
-      ]
+      ],
+      "expo-font"
     ],
     "experiments": {
       "typedRoutes": true

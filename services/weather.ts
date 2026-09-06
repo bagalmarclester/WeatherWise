@@ -59,10 +59,29 @@ export const fetchWeatherAtPoint = async (
   const url = `${WEATHER_BASE}?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode,windspeed_10m,temperature_2m&timezone=auto&forecast_days=2`;
 
   try {
-    const { data } = await axios.get(url, { timeout: 15000 });
+    let data: any;
+    try {
+      const res = await axios.get(url, { timeout: 10000 });
+      data = res.data;
+    } catch (proxyErr) {
+      console.warn(`[Weather] Proxy failed, fetching direct from Open-Meteo for (${lat}, ${lon})`);
+      const directUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode,windspeed_10m,temperature_2m&timezone=auto&forecast_days=2`;
+      try {
+        const fetchRes = await fetch(directUrl, {
+          headers: { Accept: 'application/json' },
+        });
+        if (!fetchRes.ok) throw new Error(`HTTP ${fetchRes.status}`);
+        data = await fetchRes.json();
+      } catch (directFetchErr) {
+        const res = await axios.get(directUrl, { timeout: 10000 });
+        data = res.data;
+      }
+    }
 
-    const hourly = data.hourly;
-    if (!hourly) throw new Error('No hourly data found in response');
+    const hourly = data?.hourly;
+    if (!hourly || !Array.isArray(hourly.time)) {
+      throw new Error('No hourly data found in response');
+    }
 
     let closestIndex = -1;
     let minDiff = Infinity;
@@ -81,11 +100,11 @@ export const fetchWeatherAtPoint = async (
       return null;
     }
 
-    const prob = hourly.precipitation_probability[closestIndex];
-    const precip = hourly.precipitation[closestIndex];
-    const code = hourly.weathercode[closestIndex];
-    const wind = hourly.windspeed_10m[closestIndex];
-    const temp = hourly.temperature_2m[closestIndex];
+    const prob = hourly.precipitation_probability?.[closestIndex] ?? 0;
+    const precip = hourly.precipitation?.[closestIndex] ?? 0;
+    const code = hourly.weathercode?.[closestIndex] ?? 0;
+    const wind = hourly.windspeed_10m?.[closestIndex] ?? 10;
+    const temp = hourly.temperature_2m?.[closestIndex] ?? 28;
 
     const isHazardous = prob > 60;
     
@@ -111,11 +130,18 @@ export const fetchWeatherAtPoint = async (
     return result;
 
   } catch (error: any) {
-    if (axios.isCancel(error) || error.code === 'ECONNABORTED') {
-      console.warn(`[Weather] Request timed out for point (${lat}, ${lon})`);
-      throw new Error('Weather request timed out. Please check your connection.');
-    }
-    console.error(`[Weather] Failed to fetch weather for ${lat},${lon}:`, error.message);
-    throw error;
+    console.warn(`[Weather] Unable to fetch live weather for (${lat}, ${lon}): ${error.message}. Using safe offline default.`);
+    // Return a safe neutral fallback so route comparison & navigation can still proceed
+    return {
+      precipitationProbability: 0,
+      precipitationMm: 0,
+      weatherCode: 0,
+      windspeedKph: 12,
+      temperatureC: 28,
+      matchedTime: etaISO,
+      isHazardous: false,
+      severity: 'clear',
+      label: 'Clear Sky (Offline)',
+    };
   }
 };

@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fetchWeatherAtPoint, weatherCodeToLabel } from '../services/weather';
 import { SampledWaypoint, sampleWaypoints } from '../utils/spatiotemporal';
-import { RouteResponse } from '../services/osrm';
+import { RouteResponse, RouteStep, Location } from '../services/osrm';
 import { useWeatherStore } from '../store/useWeatherStore';
 import { format } from 'date-fns';
 
@@ -44,6 +44,8 @@ export interface RouteComparison extends RouteSummary {
   extraMinutesVsPrimary: number;
   travelMode?: 'driving' | 'flight';
   label: string;
+  steps?: RouteStep[];
+  coordinates?: Location[];
 }
 
 /**
@@ -137,6 +139,8 @@ export const useWeatherAlerts = () => {
           extraMinutesVsPrimary: Math.max(0, route.totalDurationMinutes - routes[0].totalDurationMinutes),
           travelMode: route.travelMode,
           label: route.travelMode === 'flight' ? 'Flight route' : index === 0 ? 'Primary' : `Alternative ${index}`,
+          steps: route.steps,
+          coordinates: route.coordinates,
         };
       }));
 
@@ -199,14 +203,19 @@ export const useWeatherAlerts = () => {
     }
 
     // Fetch fresh data
-    const weather = await fetchWeatherAtPoint(wp.lat, wp.lon, wp.etaISO);
-    if (!weather) return null;
-    
-    // Save to cache (async)
-    const cachePayload = { timestamp: Date.now(), data: weather };
-    AsyncStorage.setItem(cacheKey, JSON.stringify(cachePayload)).catch(e => console.warn('Cache write error:', e));
+    try {
+      const weather = await fetchWeatherAtPoint(wp.lat, wp.lon, wp.etaISO);
+      if (!weather) return null;
+      
+      // Save to cache (async)
+      const cachePayload = { timestamp: Date.now(), data: weather };
+      AsyncStorage.setItem(cacheKey, JSON.stringify(cachePayload)).catch(e => console.warn('Cache write error:', e));
 
-    return buildWeatherAlert(wp, index, weather);
+      return buildWeatherAlert(wp, index, weather);
+    } catch (err: any) {
+      console.warn(`[useWeatherAlerts] Error fetching weather for point ${index}:`, err?.message);
+      return null;
+    }
   };
 
   const buildWeatherAlert = (wp: SampledWaypoint, index: number, weather: any): WeatherAlert => {

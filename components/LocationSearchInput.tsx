@@ -89,16 +89,20 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
 
     setLoading(true);
 
-<<<<<<< HEAD
-    const url = `${NOMINATIM_BASE}/search?q=${encodeURIComponent(trimmed)}&format=json&limit=5`;
-=======
     const url = `${NOMINATIM_BASE}/search?q=${encodeURIComponent(trimmed)}&format=json&limit=8&addressdetails=1`;
->>>>>>> acc7a8a (Fix location search weather icons and flight route fallback)
 
     try {
-      const response = await fetch(url, {
-        signal: controller.signal,
-      });
+      let response: Response;
+      try {
+        response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) throw new Error('Proxy search failed');
+      } catch (proxyErr) {
+        const directUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(trimmed)}&format=json&limit=8&addressdetails=1`;
+        response = await fetch(directUrl, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'WeatherWiseApp/1.0' },
+        });
+      }
 
       if (!response.ok) throw new Error('Search failed');
       const data: LocationSearchResult[] = await response.json();

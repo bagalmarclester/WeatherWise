@@ -1,5 +1,14 @@
 import * as dotenv from 'dotenv';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import {
+  calculateBearing,
+  formatDistance,
+  formatDuration,
+  formatManeuverInstruction,
+  getManeuverIcon,
+  findUpcomingHazard,
+  formatWeatherWarningSpeech,
+} from './utils/navigationCalculations';
 
 // Load .env file
 dotenv.config();
@@ -111,6 +120,61 @@ async function runTests() {
     const genAI = new GoogleGenerativeAI(geminiKey);
     assert(typeof genAI.getGenerativeModel === 'function', "TC-028: GoogleGenerativeAI SDK initialized correctly");
   }
+
+  // SC-07: Verify Turn-by-Turn Navigation Engine Logic
+  console.log("\n--- SC-07: Turn-by-Turn Navigation Engine Logic ---");
+
+  // Bearing calculation
+  const northBearing = calculateBearing({ lat: 0, lon: 0 }, { lat: 1, lon: 0 });
+  assert(northBearing === 0 || northBearing === 360, "TC-060: Compass bearing heading North is 0°");
+
+  const eastBearing = calculateBearing({ lat: 0, lon: 0 }, { lat: 0, lon: 1 });
+  assert(eastBearing === 90, "TC-061: Compass bearing heading East is 90°");
+
+  // Distance formatting
+  assert(formatDistance(350) === "350 m", "TC-062: Sub-kilometer distance formats as meters ('350 m')");
+  assert(formatDistance(2400) === "2.4 km", "TC-063: Kilometer distance formats as kilometers ('2.4 km')");
+
+  // Duration formatting
+  assert(formatDuration(42) === "42 min", "TC-064: Duration under 60 mins formats as minutes ('42 min')");
+  assert(formatDuration(75) === "1 hr 15 min", "TC-065: Duration over an hour formats as hours and minutes ('1 hr 15 min')");
+
+  // Maneuver instruction formatting
+  const turnRight = formatManeuverInstruction('turn', 'right', 'JP Laurel Ave');
+  assert(turnRight === 'Turn right onto JP Laurel Ave', "TC-066: Maneuver instruction translates to 'Turn right onto JP Laurel Ave'");
+
+  const depart = formatManeuverInstruction('depart', undefined, 'Rizal Street');
+  assert(depart === 'Head out on Rizal Street', "TC-067: Maneuver departure translates to 'Head out on Rizal Street'");
+
+  const arrive = formatManeuverInstruction('arrive', undefined, '');
+  assert(arrive === 'You have arrived at your destination', "TC-068: Maneuver arrival translates to 'You have arrived at your destination'");
+
+  // Maneuver icon resolution
+  assert(getManeuverIcon('turn', 'right') === 'arrow-right-top', "TC-069: Right turn maneuver resolves to arrow-right-top icon");
+  assert(getManeuverIcon('arrive', undefined) === 'flag-checkered', "TC-070: Arrival maneuver resolves to flag-checkered icon");
+
+  // Proximity weather hazard detection
+  const testAlerts = [
+    { lat: 7.05, lon: 125.0, severity: 'clear' as const, label: 'Clear Skies', precipitationProbability: 5 },
+    { lat: 7.15, lon: 125.0, severity: 'high' as const, label: 'Heavy Thunderstorm', precipitationProbability: 85 },
+    { lat: 7.90, lon: 125.0, severity: 'moderate' as const, label: 'Moderate Rain', precipitationProbability: 55 },
+  ];
+  const upcoming = findUpcomingHazard({ lat: 7.0, lon: 125.0 }, testAlerts, 25);
+  assert(upcoming !== null && upcoming.alert.label === 'Heavy Thunderstorm', "TC-071: Accurately identifies nearest hazardous waypoint ahead within proximity");
+  assert(upcoming !== null && upcoming.alert.severity === 'high', "TC-072: Flags high-risk weather condition for driver HUD alert");
+
+  // Voice weather warning speech generator
+  const severeSpeech = formatWeatherWarningSpeech('Heavy Thunderstorm', 12.3, 'high');
+  assert(
+    severeSpeech.includes('Caution') && severeSpeech.includes('12 kilometers') && severeSpeech.includes('reduce speed'),
+    "TC-073: High-severity weather warning speech generates urgent caution and speed reduction advisory"
+  );
+
+  const moderateSpeech = formatWeatherWarningSpeech('Rain Showers', 8.1, 'moderate');
+  assert(
+    moderateSpeech.includes('Weather advisory') && moderateSpeech.includes('8 kilometers'),
+    "TC-074: Moderate weather warning speech generates advisory notice"
+  );
 
   console.log("\n📊 Test Results:");
   console.log(`✅ Passed: ${passed}`);
