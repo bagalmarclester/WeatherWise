@@ -2,7 +2,7 @@
   "expo": {
     "name": "WeatherWise",
     "slug": "weatherwise",
-    "owner": "bagalmarclester",
+    "owner": "marclester",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
