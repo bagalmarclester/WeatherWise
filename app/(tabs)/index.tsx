@@ -123,6 +123,9 @@ export default function MapScreen() {
   const isReroutingRef = useRef(false);
   const lastCalculatedEndpointsRef = useRef<string>('');
   const [mapFocusKey, setMapFocusKey] = useState(0);
+  const [mapResetKey, setMapResetKey] = useState(0);
+  // Saved camera region to restore after MapView remount
+  const savedCameraRegionRef = useRef<{ latitude: number; longitude: number; latitudeDelta: number; longitudeDelta: number } | null>(null);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -233,9 +236,17 @@ export default function MapScreen() {
   };
 
   const nudgeMapRepaint = () => {
-    if (typeof (mapRef.current as any)?.animateCamera === 'function') {
-      (mapRef.current as any).animateCamera({}, { duration: 1 });
+    // Save the current visible region so we can restore it after remount
+    if (userLocation) {
+      savedCameraRegionRef.current = {
+        latitude: userLocation.coords.latitude,
+        longitude: userLocation.coords.longitude,
+        latitudeDelta: 0.05,
+        longitudeDelta: 0.05,
+      };
     }
+    // Increment mapResetKey to force MapView to fully remount and discard all native polyline overlays
+    setMapResetKey((k) => k + 1);
   };
 
   // Wipes routes, comparisons, and map overlays. No navigation logic here,
@@ -1130,6 +1141,7 @@ export default function MapScreen() {
   return (
     <View style={styles.container}>
       <MapView
+        key={`map-${mapResetKey}`}
         ref={mapRef}
         style={styles.map}
         initialRegion={DEFAULT_REGION}
@@ -1138,6 +1150,13 @@ export default function MapScreen() {
         mapType="none"
         customMapStyle={mapStyle}
         pitchEnabled={false}
+        onMapReady={() => {
+          // After remount, restore camera to saved position so map doesn't jump to default
+          if (savedCameraRegionRef.current) {
+            mapRef.current?.animateToRegion(savedCameraRegionRef.current, 1);
+            savedCameraRegionRef.current = null;
+          }
+        }}
         onPress={(e) => {
           const { latitude, longitude } = e.nativeEvent.coordinate;
           if (isMarkingOrigin) {
