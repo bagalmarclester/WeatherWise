@@ -999,8 +999,8 @@ export default function MapScreen() {
   const riskRank = { clear: 0, moderate: 1, high: 2 } as const;
   const saferAlternative = isNavigating && currentComparison
     ? comparisons.find(
-        (c) => c.routeIndex !== selectedRouteIndex && riskRank[c.overallRisk] < riskRank[currentComparison.overallRisk]
-      )
+      (c) => c.routeIndex !== selectedRouteIndex && riskRank[c.overallRisk] < riskRank[currentComparison.overallRisk]
+    )
     : undefined;
 
   const handleAcceptSaferRoute = () => {
