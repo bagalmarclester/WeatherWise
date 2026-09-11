@@ -28,6 +28,9 @@ interface LocationSearchInputProps {
   onClear?: () => void;
   onCurrentLocationPress?: () => void;
   showCurrentLocationButton?: boolean;
+  onMarkOnMapPress?: () => void;
+  showMarkOnMapButton?: boolean;
+  isMarkingOnMap?: boolean;
 }
 
 const DEBOUNCE_MS = 300;
@@ -44,6 +47,9 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
   onClear,
   onCurrentLocationPress,
   showCurrentLocationButton,
+  onMarkOnMapPress,
+  showMarkOnMapButton,
+  isMarkingOnMap,
 }) => {
   const [query, setQuery] = useState(value);
   const [results, setResults] = useState<LocationSearchResult[]>([]);
@@ -96,7 +102,10 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
       try {
         response = await fetch(url, { signal: controller.signal });
         if (!response.ok) throw new Error('Proxy search failed');
-      } catch (proxyErr) {
+      } catch (proxyErr: any) {
+        // If the user already typed something new, bail out
+        if (controller.signal.aborted) return;
+
         const directUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(trimmed)}&format=json&limit=8&addressdetails=1`;
         response = await fetch(directUrl, {
           signal: controller.signal,
@@ -121,7 +130,8 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
       }
     } catch (error: any) {
       // Silently ignore aborted requests — they are expected
-      if (error.name === 'AbortError') return;
+      if (error.name === 'AbortError' || controller.signal.aborted) return;
+      if (error?.message?.includes('aborted')) return;
 
       console.error('Nominatim Search Error:', error);
       setResults([]);
@@ -138,8 +148,8 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
     isEditing.current = true;
     setQuery(text);
 
-    // If the user clears the field completely, notify the parent to clear the point
-    if (text.trim() === '' && onClear) {
+    // When modifying or clearing text to choose another destination, remove old route lines immediately
+    if (onClear) {
       onClear();
     }
 
@@ -204,8 +214,31 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
             Keyboard.dismiss();
             onCurrentLocationPress?.();
           }} style={styles.currentLocBtn}>
-            <MaterialCommunityIcons name="crosshairs-gps" size={16} color="#3B82F6" />
+            <MaterialCommunityIcons name="crosshairs-gps" size={15} color="#FFFFFF" />
             <Text style={styles.currentLocText}>Current</Text>
+          </TouchableOpacity>
+        )}
+        {showMarkOnMapButton && (
+          <TouchableOpacity
+            onPress={() => {
+              isEditing.current = false;
+              setShowDropdown(false);
+              Keyboard.dismiss();
+              onMarkOnMapPress?.();
+            }}
+            style={[
+              styles.currentLocBtn,
+              isMarkingOnMap ? styles.markOnMapBtnActive : styles.markOnMapBtn,
+            ]}
+          >
+            <MaterialCommunityIcons
+              name={isMarkingOnMap ? "map-marker-check" : "map-marker-plus"}
+              size={15}
+              color={isMarkingOnMap ? "#FFFFFF" : "#38BDF8"}
+            />
+            <Text style={[styles.currentLocText, isMarkingOnMap ? { color: '#FFFFFF' } : { color: '#38BDF8' }]}>
+              {isMarkingOnMap ? 'Tap on Map' : 'Mark on Map'}
+            </Text>
           </TouchableOpacity>
         )}
       </View>
@@ -221,6 +254,24 @@ export const LocationSearchInput: React.FC<LocationSearchInputProps> = ({
           onBlur={handleBlur}
           selectTextOnFocus={true}
         />
+        {query.length > 0 && !loading && (
+          <TouchableOpacity
+            onPress={() => {
+              isEditing.current = false;
+              setQuery('');
+              setResults([]);
+              setShowDropdown(false);
+              onClear?.();
+            }}
+            style={styles.clearInputBtn}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessible={true}
+            accessibilityRole="button"
+            accessibilityLabel={`Clear ${label}`}
+          >
+            <MaterialCommunityIcons name="close-circle" size={16} color="#94A3B8" />
+          </TouchableOpacity>
+        )}
         {loading && <ActivityIndicator size="small" color="#3B82F6" style={styles.loader} />}
       </View>
 
@@ -262,18 +313,33 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   label: {
-    color: '#3B82F6',
-    fontSize: 10,
+    color: '#FFFFFF',
+    fontSize: 11,
     fontWeight: '700',
+    letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
   currentLocBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    paddingVertical: 2,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  markOnMapBtn: {
+    backgroundColor: 'rgba(56, 189, 248, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.35)',
+  },
+  markOnMapBtnActive: {
+    backgroundColor: '#EF4444',
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
   },
   currentLocText: {
-    color: '#3B82F6',
-    fontSize: 10,
+    color: '#FFFFFF',
+    fontSize: 11,
     fontWeight: '700',
     marginLeft: 4,
   },
@@ -291,6 +357,12 @@ const styles = StyleSheet.create({
   },
   loader: {
     marginLeft: 8,
+  },
+  clearInputBtn: {
+    padding: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 4,
   },
   dropdown: {
     position: 'absolute',

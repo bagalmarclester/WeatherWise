@@ -181,13 +181,14 @@ export const fetchAlternativeRoutes = async (
     console.log('[OSRM] Fetching:', url);
     let data: any;
     try {
-      const res = await axios.get(url, { timeout: 15000 });
+      const res = await axios.get(url, { timeout: 3500 });
       data = res.data;
     } catch (proxyErr: any) {
       console.warn('[OSRM] Local proxy failed or timed out, querying HTTPS OSM routing server directly...');
       try {
         const httpsUrl = `https://routing.openstreetmap.de/routed-car/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&steps=true`;
         const resp = await fetch(httpsUrl, {
+          signal: AbortSignal.timeout(5000),
           headers: {
             'User-Agent': 'WeatherWiseApp/1.0',
             'Accept': 'application/json',
@@ -199,6 +200,7 @@ export const fetchAlternativeRoutes = async (
         console.warn('[OSRM] HTTPS OSM query failed, trying plain OSRM server...');
         const directUrl = `http://router.project-osrm.org/route/v1/driving/${lon1},${lat1};${lon2},${lat2}?overview=full&geometries=geojson&alternatives=false&steps=true`;
         const resp = await fetch(directUrl, {
+          signal: AbortSignal.timeout(5000),
           headers: {
             'User-Agent': 'WeatherWiseApp/1.0',
             'Accept': 'application/json',

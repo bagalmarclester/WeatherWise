@@ -5,6 +5,7 @@ import { TabBarIcon } from '@/components/navigation/TabBarIcon';
 export default function TabLayout() {
   return (
     <Tabs
+      detachInactiveScreens={false}
       screenOptions={{
         tabBarActiveTintColor: '#3B82F6',
         tabBarInactiveTintColor: '#64748B',
@@ -13,6 +14,7 @@ export default function TabLayout() {
           borderTopColor: 'rgba(255,255,255,0.1)',
         },
         headerShown: false,
+        freezeOnBlur: false,
       }}>
       <Tabs.Screen
         name="index"
