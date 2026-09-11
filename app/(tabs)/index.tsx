@@ -5,7 +5,7 @@ import * as Location from 'expo-location';
 import { useFocusEffect } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, BackHandler, KeyboardAvoidingView, LayoutAnimation, Modal, Platform, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
-import MapView, { Marker, Polyline, UrlTile } from 'react-native-maps';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Divider, Text } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LocationSearchInput } from '../../components/LocationSearchInput';
@@ -1143,6 +1143,7 @@ export default function MapScreen() {
       <MapView
         key={`map-${mapResetKey}`}
         ref={mapRef}
+        provider={PROVIDER_GOOGLE}
         style={styles.map}
         initialRegion={DEFAULT_REGION}
         showsUserLocation={!isNavigating}
@@ -1191,15 +1192,6 @@ export default function MapScreen() {
           } catch { }
         }}
       >
-        <UrlTile
-          key={`url-tile-${mapFocusKey}`}
-          urlTemplate="https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
-          maximumZ={18}
-          flipY={false}
-          tileSize={256}
-          zIndex={1}
-        />
-
         {/* Context Pin for Map Long-Press Selection */}
         {contextPinCoords && !isNavigating && (
           <Marker
