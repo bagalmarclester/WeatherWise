@@ -117,6 +117,7 @@ export default function MapScreen() {
   const [contextPinCoords, setContextPinCoords] = useState<{ lat: number; lon: number; label: string } | null>(null);
   const [isRerouteModalVisible, setIsRerouteModalVisible] = useState(false);
   const [routeCalculationId, setRouteCalculationId] = useState(0);
+  const [routeGeneration, setRouteGeneration] = useState(0);
   const routeGenerationRef = useRef(0);
   const offRouteCountRef = useRef(0);
   const isReroutingRef = useRef(false);
@@ -145,6 +146,7 @@ export default function MapScreen() {
     if (allRoutes.length > 0) {
       routeGenerationRef.current += 1;
       setRouteCalculationId((prev) => prev + 1);
+      setRouteGeneration((g) => g + 1);
       setAllRoutes([]);
       clearStoreState();
     }
@@ -230,8 +232,16 @@ export default function MapScreen() {
     }
   };
 
+  // Wipes routes, comparisons, and map overlays. No navigation logic here,
+  // and it never calls handleExitNavigation — this is the one place state actually gets cleared.
+  const resetRouteAndMapState = () => {
+    setAllRoutes([]);
+    clearStoreState();
+    setLoadingState('');
+    setRouteGeneration((g) => g + 1);
+  };
+
   const handleExitNavigation = (shouldClearSession?: boolean | any) => {
-    const doClear = shouldClearSession !== false;
     lastWarnedHazardKeyRef.current = '';
     setIsNavigating(false);
     setIsSimulating(false);
@@ -245,48 +255,21 @@ export default function MapScreen() {
       locationSubscriptionRef.current = null;
     }
 
+    setDriverCoord(null);
+    setCurrentStepIndex(0);
+    setSimulatedCoordIndex(0);
+
+    resetRouteAndMapState(); // <-- calls the shared helper, not clearRouteState
+
     if (typeof (mapRef.current as any)?.animateCamera === 'function') {
       (mapRef.current as any).animateCamera({ pitch: 0, heading: 0 });
     }
-
-    if (doClear) {
-      routeGenerationRef.current += 1;
-      lastCalculatedEndpointsRef.current = '';
-      setRouteCalculationId((prev) => prev + 1);
-      setMapFocusKey((prev) => prev + 1);
-      setIsMarkingDestination(false);
-      setIsMarkingOrigin(false);
-      setContextPinCoords(null);
-      setDestination(null);
-      setOrigin(null);
-      setDriverCoord(null);
-      setAllRoutes([]);
-      clearStoreState();
-      setLoadingState('');
-      setRouteError(null);
-      setIsSearchExpanded(true);
-      setIsSheetCollapsed(false);
-      setIsSheetDismissed(false);
-
-      if (userLocation) {
-        mapRef.current?.animateToRegion(
-          {
-            latitude: userLocation.coords.latitude,
-            longitude: userLocation.coords.longitude,
-            latitudeDelta: 0.05,
-            longitudeDelta: 0.05,
-          },
-          800
-        );
-      }
-    } else if (allRoutes[selectedRouteIndex]) {
-      const points = allRoutes[selectedRouteIndex].coordinates.map((p: any) => ({
-        latitude: p.lat,
-        longitude: p.lon,
-      }));
-      mapRef.current?.fitToCoordinates(points, {
-        edgePadding: { top: 100, right: 100, bottom: 300, left: 100 },
-        animated: true,
+    if (userLocation) {
+      mapRef.current?.animateToRegion({
+        latitude: userLocation.coords.latitude,
+        longitude: userLocation.coords.longitude,
+        latitudeDelta: 0.05,
+        longitudeDelta: 0.05,
       });
     }
   };
@@ -310,8 +293,7 @@ export default function MapScreen() {
   const handleExitAndPlanNewRoute = (newDest?: Point) => {
     const startPoint = driverCoord || (userLocation ? { lat: userLocation.coords.latitude, lon: userLocation.coords.longitude } : origin);
     handleExitNavigation(false);
-    setAllRoutes([]);
-    clearStoreState();
+    resetRouteAndMapState();
     if (startPoint) {
       setOrigin({ lat: startPoint.lat, lon: startPoint.lon, label: 'Current Location' });
     }
@@ -327,7 +309,11 @@ export default function MapScreen() {
   };
 
   const clearRouteState = () => {
-    handleExitNavigation(true);
+    if (isNavigating) {
+      handleExitNavigation(); // this will call resetRouteAndMapState() on its own
+      return;
+    }
+    resetRouteAndMapState();
   };
 
   // Handle Android hardware/system back button during active navigation
@@ -510,6 +496,7 @@ export default function MapScreen() {
                     .then((newRoutes) => {
                       if (newRoutes && newRoutes.length > 0) {
                         const sorted = [...newRoutes].sort((a, b) => a.totalDurationMinutes - b.totalDurationMinutes);
+                        setRouteGeneration((g) => g + 1);
                         setAllRoutes(sorted);
                         setCurrentStepIndex(0);
                         const firstStep = sorted[0]?.steps?.[0];
@@ -739,6 +726,7 @@ export default function MapScreen() {
    * animates camera to that location, and reverse-geocodes to get a human-friendly address.
    */
   const markDestinationAtCoords = async (latitude: number, longitude: number) => {
+    setRouteGeneration((g) => g + 1);
     setAllRoutes([]);
     clearStoreState();
     setIsMarkingDestination(false);
@@ -800,6 +788,7 @@ export default function MapScreen() {
    * animates camera to that location, and reverse-geocodes to get a human-friendly address.
    */
   const markOriginAtCoords = async (latitude: number, longitude: number) => {
+    setRouteGeneration((g) => g + 1);
     setAllRoutes([]);
     clearStoreState();
     setIsMarkingOrigin(false);
@@ -859,6 +848,7 @@ export default function MapScreen() {
   const handleSwapEndpoints = () => {
     if (!origin && !destination) return;
     setRouteCalculationId((prev) => prev + 1);
+    setRouteGeneration((g) => g + 1);
     setAllRoutes([]);
     clearStoreState();
     const tempOrigin = origin;
@@ -869,10 +859,12 @@ export default function MapScreen() {
 
   const handleGetRoute = async () => {
     if (!origin || !destination) {
+      Alert.alert('Missing Info', 'Please select both origin and destination.');
       setRouteError('Please select both an origin and destination location.');
       return;
     }
 
+    setRouteGeneration((g) => g + 1); // new trip = new generation, drops any leftover views
     // Bump generation so any in-flight previous fetch becomes stale
     const thisGeneration = ++routeGenerationRef.current;
 
@@ -885,7 +877,7 @@ export default function MapScreen() {
 
     lastCalculatedEndpointsRef.current = `${origin.lat.toFixed(4)},${origin.lon.toFixed(4)}->${destination.lat.toFixed(4)},${destination.lon.toFixed(4)}`;
     setRouteError(null);
-    setLoadingState('Calculating route...');
+    setLoadingState(' Calculating route...');
     try {
       const fetchedRoutes = await fetchAlternativeRoutes(
         { lat: origin.lat, lon: origin.lon },
@@ -968,6 +960,7 @@ export default function MapScreen() {
       }
 
       const sortedRoutes = [...fetchedRoutes].sort((a, b) => a.totalDurationMinutes - b.totalDurationMinutes);
+      setRouteGeneration((g) => g + 1);
       setAllRoutes(sortedRoutes);
       setDestination(newDest);
       setRouteLabels('Current Position', newDest.label);
@@ -1183,7 +1176,7 @@ export default function MapScreen() {
           />
         )}
         {allRoutes && allRoutes.length > 0 ? (
-          <React.Fragment key={`routes-overlay-${routeCalculationId}-${allRoutes.length}`}>
+          <React.Fragment key={`routes-overlay-${routeGeneration}-${allRoutes.length}`}>
             {allRoutes.map((route, index) => {
               const isSelected = selectedRouteIndex === index;
               const comparison = comparisons.find(c => c.routeIndex === index);
@@ -1193,7 +1186,7 @@ export default function MapScreen() {
                 if (isNavigating) return null;
                 return (
                   <Polyline
-                    key={`calc-${routeCalculationId}-route-${index}`}
+                    key={`route-${routeGeneration}-${index}`}
                     coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
                     strokeWidth={4}
                     strokeColor="rgba(100, 116, 139, 0.4)"
@@ -1209,7 +1202,7 @@ export default function MapScreen() {
               if (!currentRoadConditions || currentRoadConditions.segments.length === 0) {
                 return (
                   <Polyline
-                    key={`calc-${routeCalculationId}-route-selected-${index}`}
+                    key={`route-${routeGeneration}-${index}-selected`}
                     coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
                     strokeWidth={6}
                     strokeColor={TRAFFIC_COLORS.free}
@@ -1220,7 +1213,7 @@ export default function MapScreen() {
 
               return currentRoadConditions.segments.map((seg) => (
                 <Polyline
-                  key={`calc-${routeCalculationId}-traffic-seg-${seg.id}`}
+                  key={`route-${routeGeneration}-traffic-seg-${seg.id}`}
                   coordinates={seg.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
                   strokeWidth={seg.condition === 'flooded' ? 8 : 6}
                   strokeColor={seg.color}
@@ -1231,7 +1224,7 @@ export default function MapScreen() {
           </React.Fragment>
         ) : (
           <Polyline
-            key={`empty-polyline-${routeCalculationId}`}
+            key={`empty-polyline-${routeGeneration}`}
             coordinates={[]}
             strokeWidth={0}
             strokeColor="transparent"
@@ -1437,6 +1430,7 @@ export default function MapScreen() {
                   onPress={() => {
                     routeGenerationRef.current += 1;
                     setRouteCalculationId((prev) => prev + 1);
+                    setRouteGeneration((g) => g + 1);
                     setAllRoutes([]);
                     clearStoreState();
                     setOrigin({ lat: contextPinCoords.lat, lon: contextPinCoords.lon, label: contextPinCoords.label });
@@ -1455,6 +1449,7 @@ export default function MapScreen() {
                   onPress={() => {
                     routeGenerationRef.current += 1;
                     setRouteCalculationId((prev) => prev + 1);
+                    setRouteGeneration((g) => g + 1);
                     setAllRoutes([]);
                     clearStoreState();
                     setDestination({ lat: contextPinCoords.lat, lon: contextPinCoords.lon, label: contextPinCoords.label });
@@ -1576,11 +1571,13 @@ export default function MapScreen() {
                   placeholder="Search start location or mark on map..."
                   value={origin?.label || ''}
                   onSelect={(lat, lon, label) => {
+                    setRouteGeneration((g) => g + 1);
                     setAllRoutes([]);
                     clearStoreState();
                     setOrigin({ lat, lon, label });
                   }}
                   onClear={() => {
+                    setRouteGeneration((g) => g + 1);
                     setAllRoutes([]);
                     clearStoreState();
                     setOrigin(null);
@@ -1612,11 +1609,13 @@ export default function MapScreen() {
                   placeholder="Search destination or mark on map..."
                   value={destination?.label || ''}
                   onSelect={(lat, lon, label) => {
+                    setRouteGeneration((g) => g + 1);
                     setAllRoutes([]);
                     clearStoreState();
                     setDestination({ lat, lon, label });
                   }}
                   onClear={() => {
+                    setRouteGeneration((g) => g + 1);
                     setAllRoutes([]);
                     clearStoreState();
                     setDestination(null);
@@ -1632,6 +1631,7 @@ export default function MapScreen() {
                   style={styles.button}
                   onPress={() => {
                     setRouteCalculationId((prev) => prev + 1);
+                    setRouteGeneration((g) => g + 1);
                     setAllRoutes([]);
                     clearStoreState();
                     setContextPinCoords(null);
