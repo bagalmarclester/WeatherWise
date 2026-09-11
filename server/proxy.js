@@ -231,6 +231,16 @@ app.post('/api/ai', async (req, res) => {
   }
 });
 
+// Root status endpoint
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    app: 'WeatherWise Backend Proxy',
+    version: '1.0.0',
+    endpoints: ['/health', '/osrm', '/weather', '/nominatim', '/gemini']
+  });
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Proxy is running' });
