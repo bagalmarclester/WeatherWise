@@ -1190,61 +1190,68 @@ export default function MapScreen() {
             zIndex={250}
           />
         )}
-        {allRoutes && allRoutes.length > 0 ? (
-          <React.Fragment key={`routes-overlay-${routeGeneration}-${allRoutes.length}`}>
-            {allRoutes.map((route, index) => {
-              const isSelected = selectedRouteIndex === index;
-              const comparison = comparisons.find(c => c.routeIndex === index);
+        {/* Route Polylines — stable slots so native overlays update in-place instead of unmounting/ghosting */}
+        {[0, 1, 2].map((slotIndex) => {
+          const route = allRoutes[slotIndex];
+          const isVisible = !!route && !isNavigating;
+          const isSelectedSlot = !!route && selectedRouteIndex === slotIndex;
 
-              if (!isSelected) {
-                // Unselected alternative lines are hidden during navigation
-                if (isNavigating) return null;
-                return (
-                  <Polyline
-                    key={`route-${routeGeneration}-${index}`}
-                    coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
-                    strokeWidth={4}
-                    strokeColor="rgba(100, 116, 139, 0.4)"
-                    lineDashPattern={[5, 5]}
-                    zIndex={5 + index}
-                    tappable={true}
-                    onPress={() => selectRoute(index)}
-                  />
-                );
-              }
+          // Unselected alternative
+          if (route && !isSelectedSlot) {
+            return (
+              <Polyline
+                key={`slot-${slotIndex}`}
+                coordinates={isVisible ? route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon })) : []}
+                strokeWidth={isVisible ? 4 : 0}
+                strokeColor={isVisible ? 'rgba(100, 116, 139, 0.4)' : 'transparent'}
+                lineDashPattern={isVisible ? [5, 5] : undefined}
+                zIndex={5 + slotIndex}
+                tappable={isVisible}
+                onPress={() => isVisible && selectRoute(slotIndex)}
+              />
+            );
+          }
 
-              // Selected route: Segmented by TRAFFIC CONGESTION & ROAD HAZARDS (Floods, Congestion, Smooth Flow)
-              if (!currentRoadConditions || currentRoadConditions.segments.length === 0) {
-                return (
-                  <Polyline
-                    key={`route-${routeGeneration}-${index}-selected`}
-                    coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
-                    strokeWidth={6}
-                    strokeColor={TRAFFIC_COLORS.free}
-                    zIndex={10}
-                  />
-                );
-              }
-
-              return currentRoadConditions.segments.map((seg) => (
+          // Selected route — if segmented by road conditions, render the first segment; rest below
+          if (route && isSelectedSlot) {
+            if (!currentRoadConditions || currentRoadConditions.segments.length === 0) {
+              return (
                 <Polyline
-                  key={`route-${routeGeneration}-traffic-seg-${seg.id}`}
-                  coordinates={seg.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
-                  strokeWidth={seg.condition === 'flooded' ? 8 : 6}
-                  strokeColor={seg.color}
-                  zIndex={seg.condition === 'flooded' ? 15 : 10}
+                  key={`slot-${slotIndex}`}
+                  coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
+                  strokeWidth={6}
+                  strokeColor={TRAFFIC_COLORS.free}
+                  zIndex={10}
                 />
-              ));
-            })}
-          </React.Fragment>
-        ) : (
-          <Polyline
-            key={`empty-polyline-${routeGeneration}`}
-            coordinates={[]}
-            strokeWidth={0}
-            strokeColor="transparent"
-          />
-        )}
+              );
+            }
+            // segmented — return null here; segments rendered below
+            return null;
+          }
+
+          // Empty slot — keeps the native overlay alive but invisible
+          return (
+            <Polyline
+              key={`slot-${slotIndex}`}
+              coordinates={[]}
+              strokeWidth={0}
+              strokeColor="transparent"
+            />
+          );
+        })}
+
+        {/* Traffic/Road-condition segments for the selected route */}
+        {allRoutes[selectedRouteIndex] && currentRoadConditions && currentRoadConditions.segments.length > 0 &&
+          currentRoadConditions.segments.map((seg: any) => (
+            <Polyline
+              key={`seg-${routeGeneration}-${seg.id}`}
+              coordinates={seg.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
+              strokeWidth={seg.condition === 'flooded' ? 8 : 6}
+              strokeColor={seg.color}
+              zIndex={seg.condition === 'flooded' ? 15 : 10}
+            />
+          ))
+        }
 
         {/* Weather Markers along route (sun, rain, cloud icons) */}
         {currentComparison?.alerts?.map((alert, index) => {
