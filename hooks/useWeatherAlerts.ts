@@ -123,6 +123,9 @@ export const useWeatherAlerts = () => {
     if (routes.length === 0) return [];
     
     setIsAnalyzing(true);
+    setComparisons([]);
+    setAlerts([]);
+    setSummary(null);
     const departureTime = new Date();
 
     try {

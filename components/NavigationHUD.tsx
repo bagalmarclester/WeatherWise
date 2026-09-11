@@ -14,6 +14,7 @@ interface NavigationHUDProps {
   remainingDistanceKm: number;
   currentSpeedKph: number;
   upcomingHazard: { alert: WeatherAlert; distanceKm: number } | null;
+  upcomingRoadHazard?: { event: any; distanceKm: number } | null;
   isSimulating: boolean;
   simulationSpeed: number;
   isMuted: boolean;
@@ -23,6 +24,7 @@ interface NavigationHUDProps {
   onToggleMute: () => void;
   onRecenter: () => void;
   onExitNavigation: () => void;
+  onChangeDestination?: () => void;
 }
 
 const COLORS = {
@@ -45,6 +47,7 @@ export const NavigationHUD: React.FC<NavigationHUDProps> = ({
   remainingDistanceKm,
   currentSpeedKph,
   upcomingHazard,
+  upcomingRoadHazard,
   isSimulating,
   simulationSpeed,
   isMuted,
@@ -54,6 +57,7 @@ export const NavigationHUD: React.FC<NavigationHUDProps> = ({
   onToggleMute,
   onRecenter,
   onExitNavigation,
+  onChangeDestination,
 }) => {
   const etaDate = new Date(Date.now() + remainingDurationMinutes * 60 * 1000);
   const etaTimeString = etaDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -94,7 +98,7 @@ export const NavigationHUD: React.FC<NavigationHUDProps> = ({
           </View>
         </View>
 
-        {/* WEATHER HAZARD HEADS-UP (WeatherWise USP) */}
+        {/* WEATHER HAZARD HEADS-UP */}
         {upcomingHazard && (
           <View
             style={[
@@ -131,6 +135,34 @@ export const NavigationHUD: React.FC<NavigationHUDProps> = ({
             </Text>
           </View>
         )}
+
+        {/* ROAD HAZARD & TRAFFIC HEADS-UP (Floods, Accidents, Congestion) */}
+        {upcomingRoadHazard && (
+          <View
+            style={[
+              styles.hazardCard,
+              {
+                borderColor: upcomingRoadHazard.event.color,
+                marginTop: upcomingHazard ? 8 : 10,
+              },
+            ]}
+          >
+            <View style={styles.hazardHeader}>
+              <Text style={{ fontSize: 18, marginRight: 6 }}>{upcomingRoadHazard.event.icon}</Text>
+              <Text
+                style={[
+                  styles.hazardTitle,
+                  { color: upcomingRoadHazard.event.color },
+                ]}
+              >
+                {upcomingRoadHazard.event.title.toUpperCase()} IN ~{Math.round(upcomingRoadHazard.distanceKm)} KM
+              </Text>
+            </View>
+            <Text style={styles.hazardDescription}>
+              {upcomingRoadHazard.event.description}
+            </Text>
+          </View>
+        )}
       </View>
 
       {/* FLOATING ACTION BUTTONS (Right Side) */}
@@ -146,11 +178,13 @@ export const NavigationHUD: React.FC<NavigationHUDProps> = ({
             color={isMuted ? COLORS.red : COLORS.white}
           />
         </TouchableOpacity>
-
         <TouchableOpacity
           style={styles.circleButton}
           onPress={onRecenter}
           activeOpacity={0.8}
+          accessible={true}
+          accessibilityRole="button"
+          accessibilityLabel="Recenter camera on vehicle"
         >
           <MaterialCommunityIcons
             name="crosshairs-gps"
@@ -158,6 +192,23 @@ export const NavigationHUD: React.FC<NavigationHUDProps> = ({
             color={COLORS.electricBlue}
           />
         </TouchableOpacity>
+
+        {onChangeDestination && (
+          <TouchableOpacity
+            style={styles.circleButton}
+            onPress={onChangeDestination}
+            activeOpacity={0.8}
+            accessible={true}
+            accessibilityRole="button"
+            accessibilityLabel="Change destination or reroute"
+          >
+            <MaterialCommunityIcons
+              name="routes"
+              size={24}
+              color={COLORS.white}
+            />
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* BOTTOM: Trip Status Bar & Simulation Controls */}
@@ -254,7 +305,11 @@ export const NavigationHUD: React.FC<NavigationHUDProps> = ({
 
 const styles = StyleSheet.create({
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     justifyContent: 'space-between',
     zIndex: 999,
   },

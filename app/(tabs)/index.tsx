@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, TouchableOpacity, ActivityIndicator, Alert, ScrollView } from 'react-native';
-import MapView, { Polyline, Marker } from 'react-native-maps';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { StyleSheet, View, TouchableOpacity, ActivityIndicator, Alert, ScrollView, LayoutAnimation, Platform, Modal, KeyboardAvoidingView } from 'react-native';
+import MapView, { Polyline, Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { BlurView } from 'expo-blur';
+import { useFocusEffect } from 'expo-router';
 import { Text, Divider } from 'react-native-paper';
 import { fetchAlternativeRoutes, RouteStep } from '../../services/osrm';
 import { useWeatherAlerts } from '../../hooks/useWeatherAlerts';
@@ -12,6 +13,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getProxyBaseUrl } from '../../utils/proxyUrl';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { NavigationHUD } from '../../components/NavigationHUD';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { analyzeRouteRoadConditions, TRAFFIC_COLORS, RoadEvent } from '../../services/roadEvents';
 import {
   calculateBearing,
   haversineDistanceMeters,
@@ -29,14 +32,28 @@ const DEFAULT_REGION = {
   longitudeDelta: 0.08,
 };
 
+// R-31 Decision: Defined 3-core color palette + semantic functional risk states
+// R-21 Decision: In-vehicle navigation palette optimized for reduced glare and high contrast
 const COLORS = {
-  navy: '#0F172A',
-  electricBlue: '#3B82F6',
-  white: '#FFFFFF',
-  gray: '#64748B',
-  red: '#EF4444',
-  green: '#10B981',
-  yellow: '#F59E0B',
+  navy: '#0F172A',           // Primary dark background
+  surfaceElevated: '#1E293B', // Card and control container background
+  surfaceSubtle: 'rgba(255, 255, 255, 0.08)',
+  borderSubtle: 'rgba(255, 255, 255, 0.15)',
+  electricBlue: '#3B82F6',   // Primary actionable accent
+  white: '#FFFFFF',          // High-contrast primary text (15:1)
+  textSecondary: '#CBD5E1',  // High-contrast secondary text (10.7:1 WCAG AA)
+  textMuted: '#94A3B8',      // Accessible caption text (7.2:1 WCAG AA)
+  red: '#EF4444',            // High risk warning state
+  green: '#10B981',          // Safe / clear risk state
+  yellow: '#F59E0B',         // Moderate risk warning state
+};
+
+// R-11 Decision: Design system token scale for border radii
+const RADII = {
+  sm: 8,   // Micro badges and tags
+  md: 12,  // Interactive buttons and inputs
+  lg: 16,  // Cards and floating panels
+  xl: 24,  // Modal and bottom sheet tops
 };
 
 const NOMINATIM_BASE = `${getProxyBaseUrl()}/nominatim`;
@@ -85,11 +102,53 @@ interface Point {
 }
 
 export default function MapScreen() {
+  const insets = useSafeAreaInsets();
   const [origin, setOrigin] = useState<Point | null>(null);
   const [destination, setDestination] = useState<Point | null>(null);
   const [loadingState, setLoadingState] = useState('');
+  const [routeError, setRouteError] = useState<string | null>(null);
   const [allRoutes, setAllRoutes] = useState<any[]>([]);
   const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
+  const [isSearchExpanded, setIsSearchExpanded] = useState(true);
+  const [isSheetCollapsed, setIsSheetCollapsed] = useState(false);
+  const [isSheetDismissed, setIsSheetDismissed] = useState(false);
+  const [isMarkingDestination, setIsMarkingDestination] = useState(false);
+  const [isMarkingOrigin, setIsMarkingOrigin] = useState(false);
+  const [contextPinCoords, setContextPinCoords] = useState<{ lat: number; lon: number; label: string } | null>(null);
+  const [isRerouteModalVisible, setIsRerouteModalVisible] = useState(false);
+  const [routeCalculationId, setRouteCalculationId] = useState(0);
+  const routeGenerationRef = useRef(0);
+  const offRouteCountRef = useRef(0);
+  const isReroutingRef = useRef(false);
+  const lastCalculatedEndpointsRef = useRef<string>('');
+  const [mapFocusKey, setMapFocusKey] = useState(0);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      setMapFocusKey((prev) => prev + 1);
+    }, [])
+  );
+
+  const [tracksViewChanges, setTracksViewChanges] = useState(true);
+
+  useEffect(() => {
+    setTracksViewChanges(true);
+    const timer = setTimeout(() => {
+      setTracksViewChanges(false);
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [destination, origin, allRoutes.length]);
+
+  // When choosing another destination or origin, remove previous route lines immediately
+  useEffect(() => {
+    // Every time destination or origin changes, nuke old routes synchronously
+    if (allRoutes.length > 0) {
+      routeGenerationRef.current += 1;
+      setRouteCalculationId((prev) => prev + 1);
+      setAllRoutes([]);
+      clearStoreState();
+    }
+  }, [destination?.lat, destination?.lon, origin?.lat, origin?.lon]);
   
   const comparisons = useWeatherStore((s) => s.comparisons);
   const selectedRouteIndex = useWeatherStore((s) => s.selectedRouteIndex);
@@ -115,23 +174,27 @@ export default function MapScreen() {
 
   const animateMapToDriver = (coord: { lat: number; lon: number }, heading: number, duration = 600) => {
     if (mapRef.current) {
-      if (typeof (mapRef.current as any).animateCamera === 'function') {
-        (mapRef.current as any).animateCamera(
-          {
-            center: { latitude: coord.lat, longitude: coord.lon },
-            pitch: 50,
-            heading,
-            zoom: 18,
-          },
-          { duration }
-        );
-      } else {
-        mapRef.current.animateToRegion({
+      // 2D UrlTile raster layers require pitch: 0; pitch > 0 causes react-native-maps to drop the tile layer into a blank white canvas
+      mapRef.current.animateToRegion(
+        {
           latitude: coord.lat,
           longitude: coord.lon,
           latitudeDelta: 0.008,
           longitudeDelta: 0.008,
-        });
+        },
+        duration
+      );
+
+      if (typeof (mapRef.current as any).animateCamera === 'function') {
+        (mapRef.current as any).animateCamera(
+          {
+            center: { latitude: coord.lat, longitude: coord.lon },
+            pitch: 0,
+            heading: isNavigating ? heading : 0,
+            zoom: 16,
+          },
+          { duration }
+        );
       }
     }
   };
@@ -202,9 +265,17 @@ export default function MapScreen() {
     if (isNavigating) {
       handleExitNavigation();
     }
+    setRouteCalculationId((prev) => prev + 1);
+    setIsMarkingDestination(false);
+    setIsMarkingOrigin(false);
+    setContextPinCoords(null);
     setAllRoutes([]);
     clearStoreState();
     setLoadingState('');
+    setRouteError(null);
+    setIsSearchExpanded(true);
+    setIsSheetCollapsed(false);
+    setIsSheetDismissed(false);
   };
 
   // Smoothly focus on the route whenever the selection changes (only when not navigating)
@@ -336,6 +407,42 @@ export default function MapScreen() {
               }
               return stepIdx;
             });
+
+            // Automatic Off-Route Detection (> 75m deviation from planned route)
+            if (activeRoute?.coordinates && activeRoute.coordinates.length > 1 && destination && !isReroutingRef.current) {
+              let minDistance = Infinity;
+              const coords = activeRoute.coordinates;
+              const stepInterval = Math.max(1, Math.floor(coords.length / 40));
+              for (let i = 0; i < coords.length; i += stepInterval) {
+                const d = haversineDistanceMeters(newCoord, coords[i]);
+                if (d < minDistance) minDistance = d;
+              }
+
+              if (minDistance > 75) {
+                offRouteCountRef.current += 1;
+                if (offRouteCountRef.current >= 4) {
+                  offRouteCountRef.current = 0;
+                  isReroutingRef.current = true;
+                  speakGuidance('Recalculating route...', isMuted);
+                  fetchAlternativeRoutes(newCoord, { lat: destination.lat, lon: destination.lon })
+                    .then((newRoutes) => {
+                      if (newRoutes && newRoutes.length > 0) {
+                        const sorted = [...newRoutes].sort((a, b) => a.totalDurationMinutes - b.totalDurationMinutes);
+                        setAllRoutes(sorted);
+                        setCurrentStepIndex(0);
+                        const firstStep = sorted[0]?.steps?.[0];
+                        if (firstStep) speakGuidance(firstStep.instruction, isMuted);
+                      }
+                    })
+                    .catch((err) => console.warn('Auto reroute failed:', err))
+                    .finally(() => {
+                      isReroutingRef.current = false;
+                    });
+                }
+              } else {
+                offRouteCountRef.current = 0;
+              }
+            }
           }
         );
         locationSubscriptionRef.current = sub;
@@ -480,11 +587,11 @@ export default function MapScreen() {
       usedCachedCoords = true;
     }
 
-    // 3. INSTANT UI FEEDBACK — set origin immediately with cached coords
+    // 3. INSTANT UI FEEDBACK: set origin immediately with cached coords
     //    No loading spinner, no blocking. The user sees "Current Location" right away.
     setOrigin({ lat: latitude, lon: longitude, label: 'Current Location' });
 
-    // 4. BACKGROUND REFINEMENT — improve coords + resolve address asynchronously
+    // 4. BACKGROUND REFINEMENT: improve coords + resolve address asynchronously
     //    Both have a strict 3-second timeout so the app never hangs.
     (async () => {
       let refinedLat = latitude;
@@ -545,18 +652,166 @@ export default function MapScreen() {
     })();
   };
 
+  /**
+   * Drops a destination pin at tapped/selected coordinates on the map,
+   * animates camera to that location, and reverse-geocodes to get a human-friendly address.
+   */
+  const markDestinationAtCoords = async (latitude: number, longitude: number) => {
+    setAllRoutes([]);
+    clearStoreState();
+    setIsMarkingDestination(false);
+    setIsSearchExpanded(true);
+
+    const initialLabel = `Marked Location (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`;
+    setDestination({
+      lat: latitude,
+      lon: longitude,
+      label: initialLabel,
+    });
+
+    mapRef.current?.animateToRegion(
+      {
+        latitude,
+        longitude,
+        latitudeDelta: 0.015,
+        longitudeDelta: 0.015,
+      },
+      500
+    );
+
+    try {
+      let response: Response;
+      try {
+        response = await fetch(
+          `${NOMINATIM_BASE}/reverse?lat=${latitude}&lon=${longitude}&format=json`
+        );
+        if (!response.ok) throw new Error('Proxy reverse failed');
+      } catch {
+        const directUrl = `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`;
+        response = await fetch(directUrl, {
+          headers: { 'User-Agent': 'WeatherWiseApp/1.0' },
+        });
+      }
+
+      const data = await response.json();
+      if (data && data.display_name) {
+        const segments = data.display_name.split(',').map((s: string) => s.trim());
+        const cleanLabel = segments.length > 3
+          ? `${segments[0]}, ${segments[segments.length - 1]}`
+          : segments.length > 2
+          ? `${segments[0]}, ${segments[1]}, ${segments[2]}`
+          : data.display_name;
+
+        setDestination({
+          lat: latitude,
+          lon: longitude,
+          label: cleanLabel,
+        });
+      }
+    } catch {
+      // Retain coordinate fallback label if network/reverse geocoding fails
+    }
+  };
+
+  /**
+   * Drops an origin pin at tapped/selected coordinates on the map,
+   * animates camera to that location, and reverse-geocodes to get a human-friendly address.
+   */
+  const markOriginAtCoords = async (latitude: number, longitude: number) => {
+    setAllRoutes([]);
+    clearStoreState();
+    setIsMarkingOrigin(false);
+    setIsSearchExpanded(true);
+
+    const initialLabel = `Marked Start (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`;
+    setOrigin({
+      lat: latitude,
+      lon: longitude,
+      label: initialLabel,
+    });
+
+    mapRef.current?.animateToRegion(
+      {
+        latitude,
+        longitude,
+        latitudeDelta: 0.015,
+        longitudeDelta: 0.015,
+      },
+      500
+    );
+
+    try {
+      let response: Response;
+      try {
+        response = await fetch(
+          `${NOMINATIM_BASE}/reverse?lat=${latitude}&lon=${longitude}&format=json`
+        );
+        if (!response.ok) throw new Error('Proxy reverse failed');
+      } catch {
+        const directUrl = `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`;
+        response = await fetch(directUrl, {
+          headers: { 'User-Agent': 'WeatherWiseApp/1.0' },
+        });
+      }
+
+      const data = await response.json();
+      if (data && data.display_name) {
+        const segments = data.display_name.split(',').map((s: string) => s.trim());
+        const cleanLabel = segments.length > 3
+          ? `${segments[0]}, ${segments[segments.length - 1]}`
+          : segments.length > 2
+          ? `${segments[0]}, ${segments[1]}, ${segments[2]}`
+          : data.display_name;
+
+        setOrigin({
+          lat: latitude,
+          lon: longitude,
+          label: cleanLabel,
+        });
+      }
+    } catch {
+      // Retain coordinate fallback label if network/reverse geocoding fails
+    }
+  };
+
+  const handleSwapEndpoints = () => {
+    if (!origin && !destination) return;
+    setRouteCalculationId((prev) => prev + 1);
+    setAllRoutes([]);
+    clearStoreState();
+    const tempOrigin = origin;
+    const tempDest = destination;
+    setOrigin(tempDest);
+    setDestination(tempOrigin);
+  };
+
   const handleGetRoute = async () => {
     if (!origin || !destination) {
-      Alert.alert('Missing Info', 'Please select both origin and destination.');
+      setRouteError('Please select both an origin and destination location.');
       return;
     }
 
-    setLoadingState('🗺 Calculating route...');
+    // Bump generation so any in-flight previous fetch becomes stale
+    const thisGeneration = ++routeGenerationRef.current;
+
+    // Immediately remove all previous route lines, markers, hazard overlays, and comparison data
+    setRouteCalculationId((prev) => prev + 1);
+    setAllRoutes([]);
+    clearStoreState();
+    setContextPinCoords(null);
+    lastWarnedHazardKeyRef.current = '';
+
+    lastCalculatedEndpointsRef.current = `${origin.lat.toFixed(4)},${origin.lon.toFixed(4)}->${destination.lat.toFixed(4)},${destination.lon.toFixed(4)}`;
+    setRouteError(null);
+    setLoadingState('Calculating route...');
     try {
       const fetchedRoutes = await fetchAlternativeRoutes(
         { lat: origin.lat, lon: origin.lon },
         { lat: destination.lat, lon: destination.lon }
       );
+
+      // If a newer calculation was started while we were fetching, discard these results
+      if (routeGenerationRef.current !== thisGeneration) return;
 
       // Sort by duration (fastest first) and limit to 3 total
       const sortedRoutes = fetchedRoutes
@@ -566,10 +821,16 @@ export default function MapScreen() {
       setAllRoutes(sortedRoutes);
       setRouteLabels(origin.label, destination.label);
       
-      setLoadingState('🌦 Checking weather along your route...');
+      setLoadingState('Checking weather along route...');
       const comparisonResults = await compareRoutes(sortedRoutes);
+
+      // Check again after weather analysis — another calculation may have started
+      if (routeGenerationRef.current !== thisGeneration) return;
       
-      setLoadingState('✅ Done — checking results');
+      setLoadingState('Routes ready');
+      setIsSearchExpanded(false);
+      setIsSheetCollapsed(false);
+      setIsSheetDismissed(false);
       setTimeout(() => setLoadingState(''), 1500);
 
       // Select the safest/best route by default (top of comparison)
@@ -584,13 +845,80 @@ export default function MapScreen() {
       });
 
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Could not fetch routes.');
+      if (routeGenerationRef.current !== thisGeneration) return;
+      setRouteError(error.message || 'Could not fetch routes. Please check network connection.');
+      setLoadingState('');
+    }
+  };
+
+  // Auto-calculate routes when both origin and destination are set (debounced by 600ms)
+  useEffect(() => {
+    if (isNavigating || !origin || !destination) return;
+    const currentKey = `${origin.lat.toFixed(4)},${origin.lon.toFixed(4)}->${destination.lat.toFixed(4)},${destination.lon.toFixed(4)}`;
+    if (lastCalculatedEndpointsRef.current === currentKey) return;
+
+    const timer = setTimeout(() => {
+      lastCalculatedEndpointsRef.current = currentKey;
+      handleGetRoute();
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [origin?.lat, origin?.lon, destination?.lat, destination?.lon, isNavigating]);
+
+  // In-drive dynamic rerouting (Google Maps style)
+  const handleInDriveReroute = async (newDest: { lat: number; lon: number; label: string }) => {
+    setIsRerouteModalVisible(false);
+    const startPoint = driverCoord || (userLocation ? { lat: userLocation.coords.latitude, lon: userLocation.coords.longitude } : origin);
+    if (!startPoint) {
+      Alert.alert('Location Error', 'Unable to determine vehicle location for rerouting.');
+      return;
+    }
+
+    setLoadingState('Rerouting...');
+    speakGuidance(`Rerouting to ${newDest.label.split(',')[0]}.`, isMuted);
+
+    try {
+      const fetchedRoutes = await fetchAlternativeRoutes(startPoint, { lat: newDest.lat, lon: newDest.lon });
+      if (!fetchedRoutes || fetchedRoutes.length === 0) {
+        Alert.alert('Route Error', 'Could not find a valid route to the new destination.');
+        setLoadingState('');
+        return;
+      }
+
+      const sortedRoutes = [...fetchedRoutes].sort((a, b) => a.totalDurationMinutes - b.totalDurationMinutes);
+      setAllRoutes(sortedRoutes);
+      setDestination(newDest);
+      setRouteLabels('Current Position', newDest.label);
+      setCurrentStepIndex(0);
+      setSimulatedCoordIndex(0);
+
+      compareRoutes(sortedRoutes).catch((err) => console.warn('Reroute weather comparison error:', err));
+
+      const firstStep = sortedRoutes[0]?.steps?.[0];
+      if (firstStep) {
+        speakGuidance(firstStep.instruction, isMuted);
+      }
+    } catch (e: any) {
+      console.warn('In-drive rerouting error:', e);
+      Alert.alert('Reroute Failed', 'Unable to calculate new route. Continuing on current route.');
+    } finally {
       setLoadingState('');
     }
   };
 
   const currentRoute = allRoutes[selectedRouteIndex];
-  const currentComparison = comparisons.find(c => c.routeIndex === selectedRouteIndex);
+  const currentComparison = comparisons.find(c => c.routeIndex === selectedRouteIndex) || comparisons[0];
+  const currentRiskColor = currentComparison?.overallRisk === 'high'
+    ? COLORS.red
+    : currentComparison?.overallRisk === 'moderate'
+    ? COLORS.yellow
+    : COLORS.green;
+
+  // Road condition & traffic analysis (congestion, floods, road hazards)
+  const currentRoadConditions = useMemo(() => {
+    if (!currentRoute) return null;
+    return analyzeRouteRoadConditions(currentRoute, currentComparison?.alerts || []);
+  }, [currentRoute, currentComparison]);
 
   const currentStep = currentRoute?.steps && currentRoute.steps[currentStepIndex]
     ? currentRoute.steps[currentStepIndex]
@@ -615,6 +943,16 @@ export default function MapScreen() {
     ? findUpcomingHazard(driverCoord, currentComparison?.alerts || [])
     : null;
 
+  const upcomingRoadHazard = driverCoord && currentRoadConditions
+    ? currentRoadConditions.roadEvents.reduce<{ event: RoadEvent; distanceKm: number } | null>((closest, ev) => {
+        const d = haversineDistanceMeters(driverCoord, { lat: ev.lat, lon: ev.lon }) / 1000;
+        if (d <= 25 && (!closest || d < closest.distanceKm)) {
+          return { event: ev, distanceKm: d };
+        }
+        return closest;
+      }, null)
+    : null;
+
   // Spoken voice warning alert when approaching a weather hazard
   useEffect(() => {
     if (!isNavigating || !upcomingHazard || isMuted) return;
@@ -633,6 +971,28 @@ export default function MapScreen() {
     }
   }, [isNavigating, upcomingHazard, isMuted]);
 
+  // Compute active navigation references for destination and driver position
+  const activeNavRoute = allRoutes[selectedRouteIndex];
+  const targetDestination = destination
+    ? { latitude: destination.lat, longitude: destination.lon, label: destination.label }
+    : activeNavRoute?.coordinates?.length
+    ? {
+        latitude: activeNavRoute.coordinates[activeNavRoute.coordinates.length - 1].lat,
+        longitude: activeNavRoute.coordinates[activeNavRoute.coordinates.length - 1].lon,
+        label: 'Destination',
+      }
+    : null;
+
+  const currentDriverPos = isNavigating
+    ? driverCoord
+      ? { latitude: driverCoord.lat, longitude: driverCoord.lon }
+      : activeNavRoute?.coordinates?.length
+      ? { latitude: activeNavRoute.coordinates[0].lat, longitude: activeNavRoute.coordinates[0].lon }
+      : userLocation
+      ? { latitude: userLocation.coords.latitude, longitude: userLocation.coords.longitude }
+      : null
+    : null;
+
   return (
     <View style={styles.container}>
       <MapView
@@ -641,86 +1001,117 @@ export default function MapScreen() {
         initialRegion={DEFAULT_REGION}
         showsUserLocation={!isNavigating}
         showsMyLocationButton={!isNavigating}
+        mapType="none"
         customMapStyle={mapStyle}
+        pitchEnabled={false}
+        onPress={(e) => {
+          const { latitude, longitude } = e.nativeEvent.coordinate;
+          if (isMarkingOrigin) {
+            markOriginAtCoords(latitude, longitude);
+          } else if (isMarkingDestination) {
+            markDestinationAtCoords(latitude, longitude);
+          } else if (contextPinCoords) {
+            setContextPinCoords(null);
+          }
+        }}
+        onLongPress={async (e) => {
+          if (!isNavigating) {
+            const { latitude, longitude } = e.nativeEvent.coordinate;
+            const fallbackLabel = `Location (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`;
+            setContextPinCoords({ lat: latitude, lon: longitude, label: fallbackLabel });
+
+            try {
+              let response: Response;
+              try {
+                response = await fetch(`${NOMINATIM_BASE}/reverse?lat=${latitude}&lon=${longitude}&format=json`);
+                if (!response.ok) throw new Error('Proxy reverse failed');
+              } catch {
+                response = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`, {
+                  headers: { 'User-Agent': 'WeatherWiseApp/1.0' },
+                });
+              }
+              const data = await response.json();
+              if (data && data.display_name) {
+                const segments = data.display_name.split(',').map((s: string) => s.trim());
+                const clean = segments.length > 2 ? `${segments[0]}, ${segments[1]}` : data.display_name;
+                setContextPinCoords({ lat: latitude, lon: longitude, label: clean });
+              }
+            } catch {}
+          }
+        }}
       >
+        <UrlTile
+          key={`url-tile-${mapFocusKey}`}
+          urlTemplate="https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+          maximumZ={18}
+          flipY={false}
+          tileSize={256}
+          zIndex={1}
+        />
+
+        {/* Context Pin for Map Long-Press Selection */}
+        {contextPinCoords && !isNavigating && (
+          <Marker
+            coordinate={{ latitude: contextPinCoords.lat, longitude: contextPinCoords.lon }}
+            title={contextPinCoords.label}
+            pinColor={COLORS.electricBlue}
+            zIndex={250}
+          />
+        )}
         {allRoutes.map((route, index) => {
           const isSelected = selectedRouteIndex === index;
           const comparison = comparisons.find(c => c.routeIndex === index);
           
           if (!isSelected) {
-            // Unselected routes are gray and dashed
+            // Unselected alternative lines are hidden during navigation
+            if (isNavigating) return null;
             return (
               <Polyline
-                key={`route-${index}`}
+                key={`calc-${routeCalculationId}-route-${index}`}
                 coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
                 strokeWidth={4}
                 strokeColor="rgba(100, 116, 139, 0.4)"
                 lineDashPattern={[5, 5]}
-                zIndex={index}
+                zIndex={5 + index}
                 tappable={true}
                 onPress={() => selectRoute(index)}
               />
             );
           }
 
-          // Selected route: segmented and colored by weather severity
-          if (!comparison || !comparison.alerts || comparison.alerts.length === 0) {
+          // Selected route: Segmented by TRAFFIC CONGESTION & ROAD HAZARDS (Floods, Congestion, Smooth Flow)
+          if (!currentRoadConditions || currentRoadConditions.segments.length === 0) {
             return (
               <Polyline
-                key={`route-${index}`}
+                key={`calc-${routeCalculationId}-route-selected-${index}`}
                 coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
                 strokeWidth={6}
-                strokeColor={COLORS.electricBlue}
+                strokeColor={TRAFFIC_COLORS.free}
                 zIndex={10}
               />
             );
           }
 
-          const polylines = [];
-          const coords = route.coordinates;
-          const alerts = comparison.alerts;
-
-          let startIndex = 0;
-          for (let i = 0; i < alerts.length; i++) {
-            const alert = alerts[i];
-            const nextAlert = alerts[i + 1];
-            
-            // Assign coords to the nearest waypoint segment
-            const endIndex = nextAlert 
-              ? Math.floor((alert.segmentIndex + nextAlert.segmentIndex) / 2) 
-              : coords.length - 1;
-            
-            // Fallback safety if indexes are weird
-            const start = Math.max(0, Math.min(startIndex, coords.length - 1));
-            const end = Math.max(0, Math.min(endIndex, coords.length - 1));
-            
-            const segmentCoords = coords.slice(start, end + 1).map((p: any) => ({ latitude: p.lat, longitude: p.lon }));
-            
-            const color = alert.severity === 'high' ? COLORS.red : alert.severity === 'moderate' ? COLORS.yellow : COLORS.green;
-            
-            polylines.push(
-              <Polyline
-                key={`route-seg-${i}`}
-                coordinates={segmentCoords}
-                strokeWidth={6}
-                strokeColor={color}
-                zIndex={10}
-              />
-            );
-            
-            startIndex = end; // start next segment where this one ended
-          }
-          return polylines;
+          return currentRoadConditions.segments.map((seg) => (
+            <Polyline
+              key={`calc-${routeCalculationId}-traffic-seg-${seg.id}`}
+              coordinates={seg.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
+              strokeWidth={seg.condition === 'flooded' ? 8 : 6}
+              strokeColor={seg.color}
+              zIndex={seg.condition === 'flooded' ? 15 : 10}
+            />
+          ));
         })}
         
+        {/* Weather Markers along route (sun, rain, cloud icons) */}
         {currentComparison?.alerts?.map((alert, index) => {
           const emoji = getWeatherEmoji(alert.weatherCode);
           const markerColor = alert.severity === 'high' ? COLORS.red : alert.severity === 'moderate' ? COLORS.yellow : COLORS.green;
           return (
             <Marker
-              key={`alert-${index}`}
+              key={`calc-${routeCalculationId}-alert-${index}`}
               coordinate={{ latitude: alert.lat, longitude: alert.lon }}
-              title={alert.label}
+              title={`Weather: ${alert.label}`}
               description={`${alert.precipitationProbability}% rain · in ${alert.minutesFromNow} min`}
             >
               <View style={[styles.alertMarker, { borderColor: markerColor, borderWidth: 2, borderRadius: 20, backgroundColor: 'rgba(15,23,42,0.85)', padding: 4 }]}>
@@ -729,6 +1120,66 @@ export default function MapScreen() {
             </Marker>
           );
         })}
+
+        {/* Road Hazard Markers: Floods, Accidents, Congestion */}
+        {currentRoadConditions?.roadEvents?.map((event) => (
+          <Marker
+            key={`calc-${routeCalculationId}-event-${event.id}`}
+            coordinate={{ latitude: event.lat, longitude: event.lon }}
+            title={event.title}
+            description={event.description}
+            zIndex={30}
+          >
+            <View style={[styles.roadEventMarker, { borderColor: event.color }]}>
+              <Text style={{ fontSize: 18 }}>{event.icon}</Text>
+            </View>
+          </Marker>
+        ))}
+
+        {/* Origin Marker */}
+        {origin && !isNavigating && (
+          <Marker
+            key={`origin-${origin.lat}-${origin.lon}`}
+            coordinate={{ latitude: origin.lat, longitude: origin.lon }}
+            title="Origin"
+            description={origin.label}
+            zIndex={190}
+            anchor={{ x: 0.5, y: 1 }}
+            tracksViewChanges={tracksViewChanges}
+          >
+            <View style={styles.originMarkerContainer} collapsable={false}>
+              <View style={styles.originMarkerBadge}>
+                <MaterialCommunityIcons name="map-marker-radius" size={18} color={COLORS.white} />
+              </View>
+              <View style={styles.originMarkerStem} />
+              <View style={styles.originMarkerDot} />
+            </View>
+          </Marker>
+        )}
+
+        {/* Destination Marker - Always visible whenever destination or route is set */}
+        {targetDestination && (
+          <Marker
+            key={`destination-${targetDestination.latitude.toFixed(4)}-${targetDestination.longitude.toFixed(4)}`}
+            coordinate={{ latitude: targetDestination.latitude, longitude: targetDestination.longitude }}
+            title="Destination"
+            description={targetDestination.label}
+            zIndex={900}
+            anchor={{ x: 0.5, y: 1 }}
+            tracksViewChanges={true}
+          >
+            <View style={styles.destinationMarkerContainer} collapsable={false}>
+              <View style={styles.destinationLabelPill}>
+                <Text style={styles.destinationLabelPillText}>DESTINATION</Text>
+              </View>
+              <View style={styles.destinationMarkerBadge}>
+                <MaterialCommunityIcons name="flag-checkered" size={22} color={COLORS.white} />
+              </View>
+              <View style={styles.destinationMarkerStem} />
+              <View style={styles.destinationMarkerDot} />
+            </View>
+          </Marker>
+        )}
 
         {/* User Location Marker when not navigating */}
         {!isNavigating && userLocation && (
@@ -740,166 +1191,624 @@ export default function MapScreen() {
         )}
 
         {/* Active Driver Navigation Marker */}
-        {isNavigating && driverCoord && (
+        {isNavigating && currentDriverPos && (
           <Marker
-            coordinate={{ latitude: driverCoord.lat, longitude: driverCoord.lon }}
+            key="active-driver-vehicle"
+            coordinate={currentDriverPos}
             anchor={{ x: 0.5, y: 0.5 }}
-            flat
-            rotation={driverHeading}
+            tracksViewChanges={true}
             zIndex={999}
           >
-            <View style={styles.navVehicleContainer}>
+            <View style={styles.navVehicleContainer} collapsable={false}>
               <View style={styles.navVehiclePulse} />
-              <View style={styles.navVehicleIcon}>
-                <MaterialCommunityIcons name="navigation" size={22} color={COLORS.white} />
+              <View
+                style={[
+                  styles.navVehicleIcon,
+                  { transform: [{ rotate: `${driverHeading}deg` }] },
+                ]}
+              >
+                <MaterialCommunityIcons name="navigation" size={24} color={COLORS.white} />
               </View>
             </View>
           </Marker>
         )}
       </MapView>
 
-      {/* INPUT SEARCH PANEL (Hidden during Navigation) */}
-      {!isNavigating && (
-        <View style={styles.inputWrapper}>
-          <BlurView intensity={80} tint="dark" style={styles.blurContainer}>
-            <View style={styles.inputContainer}>
-              <LocationSearchInput
-                label="Origin"
-                placeholder="Search start location..."
-                value={origin?.label || ''}
-                onSelect={(lat, lon, label) => {
-                  clearRouteState();
-                  setOrigin({ lat, lon, label });
+      {/* Tap Map to Mark Origin or Destination Floating Banner */}
+      {(isMarkingDestination || isMarkingOrigin) && !isNavigating && (
+        <View style={[styles.markingBanner, { top: insets.top + (isSearchExpanded && allRoutes.length === 0 ? 210 : 64) }]}>
+          <BlurView intensity={90} tint="dark" style={styles.markingBannerBlur}>
+            <MaterialCommunityIcons
+              name={isMarkingOrigin ? "map-marker-radius" : "map-marker-plus"}
+              size={20}
+              color={isMarkingOrigin ? COLORS.electricBlue : "#EF4444"}
+              style={{ marginRight: 8 }}
+            />
+            <Text style={styles.markingBannerText}>
+              {isMarkingOrigin ? "Tap map to set Starting Point" : "Tap map to set Destination"}
+            </Text>
+            <TouchableOpacity
+              style={styles.markingCancelBtn}
+              onPress={() => {
+                setIsMarkingDestination(false);
+                setIsMarkingOrigin(false);
+              }}
+              accessible={true}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel map marking"
+            >
+              <MaterialCommunityIcons name="close" size={16} color={COLORS.white} />
+            </TouchableOpacity>
+          </BlurView>
+        </View>
+      )}
+
+      {/* Interactive Context Pin Card (Long-Press anywhere on Map) */}
+      {contextPinCoords && !isNavigating && (
+        <View style={styles.contextPinCardContainer}>
+          <BlurView intensity={95} tint="dark" style={styles.contextPinCard}>
+            <View style={styles.contextPinHeader}>
+              <MaterialCommunityIcons name="map-marker" size={20} color={COLORS.electricBlue} style={{ marginRight: 8 }} />
+              <Text style={styles.contextPinTitle} numberOfLines={1}>
+                {contextPinCoords.label}
+              </Text>
+              <TouchableOpacity
+                onPress={() => setContextPinCoords(null)}
+                style={styles.contextPinCloseBtn}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Close pin selector"
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <MaterialCommunityIcons name="close" size={18} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.contextPinActionsRow}>
+              <TouchableOpacity
+                style={styles.contextPinOriginBtn}
+                onPress={() => {
+                  routeGenerationRef.current += 1;
+                  setRouteCalculationId((prev) => prev + 1);
+                  setAllRoutes([]);
+                  clearStoreState();
+                  setOrigin({ lat: contextPinCoords.lat, lon: contextPinCoords.lon, label: contextPinCoords.label });
+                  setContextPinCoords(null);
                 }}
-                onClear={() => {
-                  clearRouteState();
-                  setOrigin(null);
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Set as starting location"
+                activeOpacity={0.8}
+              >
+                <MaterialCommunityIcons name="map-marker-radius" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
+                <Text style={styles.contextPinOriginBtnText}>Set as Start</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.contextPinDestBtn}
+                onPress={() => {
+                  routeGenerationRef.current += 1;
+                  setRouteCalculationId((prev) => prev + 1);
+                  setAllRoutes([]);
+                  clearStoreState();
+                  setDestination({ lat: contextPinCoords.lat, lon: contextPinCoords.lon, label: contextPinCoords.label });
+                  setContextPinCoords(null);
                 }}
-                showCurrentLocationButton={true}
-                onCurrentLocationPress={handleUseCurrentLocation}
-              />
-              <Divider style={styles.divider} />
-              <LocationSearchInput
-                label="Destination"
-                placeholder="Search destination..."
-                value={destination?.label || ''}
-                onSelect={(lat, lon, label) => {
-                  clearRouteState();
-                  setDestination({ lat, lon, label });
-                }}
-                onClear={() => {
-                  clearRouteState();
-                  setDestination(null);
-                }}
-              />
-              <TouchableOpacity style={styles.button} onPress={handleGetRoute} disabled={!!loadingState || isAnalyzing}>
-                {loadingState || isAnalyzing ? (
-                  <Text style={styles.buttonText}>{loadingState || 'Analyzing...'}</Text>
-                ) : (
-                  <Text style={styles.buttonText}>Compare Routes</Text>
-                )}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Set as destination"
+                activeOpacity={0.8}
+              >
+                <MaterialCommunityIcons name="flag-checkered" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
+                <Text style={styles.contextPinDestBtnText}>Set as Destination</Text>
               </TouchableOpacity>
             </View>
           </BlurView>
+        </View>
+      )}
+
+      {/* TRAFFIC & ROAD CONDITION LEGEND */}
+      {!isNavigating && allRoutes.length > 0 && (
+        <View style={[styles.trafficLegendWrapper, { top: insets.top + (allRoutes.length > 0 && !isSearchExpanded ? 64 : 220) }]}>
+          <BlurView intensity={85} tint="dark" style={styles.trafficLegendBlur}>
+            <View style={styles.trafficLegendItem}>
+              <View style={[styles.legendBar, { backgroundColor: TRAFFIC_COLORS.free }]} />
+              <Text style={styles.legendText}>Fast</Text>
+            </View>
+            <View style={styles.trafficLegendItem}>
+              <View style={[styles.legendBar, { backgroundColor: TRAFFIC_COLORS.moderate }]} />
+              <Text style={styles.legendText}>Moderate</Text>
+            </View>
+            <View style={styles.trafficLegendItem}>
+              <View style={[styles.legendBar, { backgroundColor: TRAFFIC_COLORS.heavy }]} />
+              <Text style={styles.legendText}>Congested</Text>
+            </View>
+            <View style={styles.trafficLegendItem}>
+              <View style={[styles.legendBar, { backgroundColor: TRAFFIC_COLORS.flooded }]} />
+              <Text style={styles.legendText}>Flooded</Text>
+            </View>
+          </BlurView>
+        </View>
+      )}
+
+      {/* INPUT SEARCH PANEL (Hidden during Navigation) */}
+      {!isNavigating && (
+        <View style={[styles.inputWrapper, { top: insets.top + 8 }]}>
+          {allRoutes.length > 0 && !isSearchExpanded ? (
+            <BlurView intensity={90} tint="dark" style={styles.compactRouteBar}>
+              <TouchableOpacity
+                style={styles.compactClearBtn}
+                onPress={clearRouteState}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Clear route search"
+              >
+                <MaterialCommunityIcons name="arrow-left" size={20} color={COLORS.white} />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.compactContent}
+                onPress={() => setIsSearchExpanded(true)}
+                activeOpacity={0.7}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Edit search locations"
+              >
+                <View style={styles.compactEndpointsRow}>
+                  <Text style={styles.compactOriginText} numberOfLines={1}>
+                    {origin?.label?.split(',')[0] || 'Origin'}
+                  </Text>
+                  <MaterialCommunityIcons name="arrow-right-thin" size={16} color={COLORS.electricBlue} style={{ marginHorizontal: 6 }} />
+                  <Text style={styles.compactDestText} numberOfLines={1}>
+                    {destination?.label?.split(',')[0] || 'Destination'}
+                  </Text>
+                </View>
+                <Text style={styles.compactSubtext}>Tap to edit locations</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.compactEditBtn}
+                onPress={() => setIsSearchExpanded(true)}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Expand search panel"
+              >
+                <MaterialCommunityIcons name="pencil-outline" size={18} color={COLORS.electricBlue} />
+              </TouchableOpacity>
+            </BlurView>
+          ) : (
+            <BlurView intensity={80} tint="dark" style={styles.blurContainer}>
+              <View style={styles.inputContainer}>
+                {allRoutes.length > 0 && (
+                  <View style={styles.collapseHeaderRow}>
+                    <TouchableOpacity
+                      style={styles.collapseSearchBtn}
+                      onPress={() => setIsSearchExpanded(false)}
+                      accessible={true}
+                      accessibilityRole="button"
+                      accessibilityLabel="Hide search panel and view map"
+                    >
+                      <Text style={styles.collapseSearchText}>View Map</Text>
+                      <MaterialCommunityIcons name="chevron-up" size={18} color={COLORS.electricBlue} />
+                    </TouchableOpacity>
+                  </View>
+                )}
+                <LocationSearchInput
+                  label="Origin"
+                  placeholder="Search start location or mark on map..."
+                  value={origin?.label || ''}
+                  onSelect={(lat, lon, label) => {
+                    setAllRoutes([]);
+                    clearStoreState();
+                    setOrigin({ lat, lon, label });
+                  }}
+                  onClear={() => {
+                    setAllRoutes([]);
+                    clearStoreState();
+                    setOrigin(null);
+                  }}
+                  showCurrentLocationButton={true}
+                  onCurrentLocationPress={handleUseCurrentLocation}
+                  showMarkOnMapButton={true}
+                  isMarkingOnMap={isMarkingOrigin}
+                  onMarkOnMapPress={() => {
+                    setIsMarkingDestination(false);
+                    setIsMarkingOrigin((prev) => !prev);
+                  }}
+                />
+                <View style={styles.swapEndpointsRow}>
+                  <Divider style={styles.swapDivider} />
+                  <TouchableOpacity
+                    style={styles.swapEndpointsBtn}
+                    onPress={handleSwapEndpoints}
+                    accessible={true}
+                    accessibilityRole="button"
+                    accessibilityLabel="Swap start and destination locations"
+                    activeOpacity={0.7}
+                  >
+                    <MaterialCommunityIcons name="swap-vertical" size={20} color={COLORS.electricBlue} />
+                  </TouchableOpacity>
+                </View>
+                <LocationSearchInput
+                  label="Destination"
+                  placeholder="Search destination or mark on map..."
+                  value={destination?.label || ''}
+                  onSelect={(lat, lon, label) => {
+                    setAllRoutes([]);
+                    clearStoreState();
+                    setDestination({ lat, lon, label });
+                  }}
+                  onClear={() => {
+                    setAllRoutes([]);
+                    clearStoreState();
+                    setDestination(null);
+                  }}
+                  showMarkOnMapButton={true}
+                  isMarkingOnMap={isMarkingDestination}
+                  onMarkOnMapPress={() => {
+                    setIsMarkingOrigin(false);
+                    setIsMarkingDestination((prev) => !prev);
+                  }}
+                />
+                <TouchableOpacity
+                  style={styles.button}
+                  onPress={() => {
+                    setRouteCalculationId((prev) => prev + 1);
+                    setAllRoutes([]);
+                    clearStoreState();
+                    setContextPinCoords(null);
+                    handleGetRoute();
+                  }}
+                  disabled={!!loadingState || isAnalyzing}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel={loadingState || (isAnalyzing ? 'Analyzing weather along route' : 'Compare Routes')}
+                  accessibilityState={{ disabled: !!loadingState || isAnalyzing }}
+                >
+                  {loadingState || isAnalyzing ? (
+                    <View style={styles.buttonLoadingRow}>
+                      <ActivityIndicator size="small" color={COLORS.white} style={{ marginRight: 8 }} />
+                      <Text style={styles.buttonText}>{loadingState || 'Analyzing...'}</Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.buttonText}>Compare Routes</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </BlurView>
+          )}
           
-          {/* Dynamic Summary Banner */}
-          {summary && (
-            <TouchableOpacity 
+          {/* Inline Route Error Banner (R-27 UI States) */}
+          {routeError && (
+            <View style={styles.errorBanner} accessible={true} accessibilityRole="alert">
+              <MaterialCommunityIcons name="alert-circle" size={18} color={COLORS.white} style={{ marginRight: 8 }} />
+              <Text style={styles.errorText}>{routeError}</Text>
+              <TouchableOpacity
+                onPress={() => setRouteError(null)}
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss error"
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <MaterialCommunityIcons name="close" size={18} color={COLORS.white} />
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Dynamic Weather Summary Banner (R-25 Contrast, R-04 Vector Icon, R-26 Non-redundant CTA) */}
+          {summary && !routeError && (
+            <View 
               style={[
                 styles.summaryBanner,
                 { backgroundColor: summary.overallRisk === 'high' ? COLORS.red : summary.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green }
               ]}
-              onPress={handleStartNavigation}
-              activeOpacity={0.8}
+              accessible={true}
+              accessibilityRole="summary"
+              accessibilityLabel={`Route weather summary: ${summary.overallRisk} risk`}
             >
-              {summary.overallRisk === 'clear' && (
-                <Text style={styles.summaryText}>✅ Route clear · Tap to Start Drive</Text>
-              )}
-              {summary.overallRisk === 'moderate' && (
-                <Text style={styles.summaryText}>⚠ Rain possible · Tap to Start Drive</Text>
-              )}
-              {summary.overallRisk === 'high' && (
-                <Text style={styles.summaryText}>
-                  ⛈ {summary.firstHazardLabel} in {summary.firstHazardMinutes} min · Tap to Start Drive
-                </Text>
-              )}
-            </TouchableOpacity>
+              <MaterialCommunityIcons
+                name={
+                  summary.overallRisk === 'high'
+                    ? 'weather-lightning-rainy'
+                    : summary.overallRisk === 'moderate'
+                    ? 'weather-partly-rainy'
+                    : 'shield-check'
+                }
+                size={20}
+                color={summary.overallRisk === 'high' ? COLORS.white : COLORS.navy}
+                style={{ marginRight: 8 }}
+              />
+              <Text
+                style={[
+                  styles.summaryText,
+                  { color: summary.overallRisk === 'high' ? COLORS.white : COLORS.navy }
+                ]}
+              >
+                {summary.overallRisk === 'clear' && 'Clear weather detected along all route segments'}
+                {summary.overallRisk === 'moderate' && 'Precipitation likely along route: drive with caution'}
+                {summary.overallRisk === 'high' && `${summary.firstHazardLabel} expected in ${summary.firstHazardMinutes} min`}
+              </Text>
+            </View>
           )}
         </View>
       )}
 
       {/* ROUTE COMPARISON BOTTOM SHEET (Hidden during Navigation) */}
-      {!isNavigating && comparisons?.length > 0 && (
+      {!isNavigating && comparisons?.length > 0 && !isSheetDismissed && (
         <View style={styles.bottomSheet}>
           <BlurView intensity={95} tint="dark" style={styles.bottomBlur}>
-            <View style={styles.sheetHeaderRow}>
-              <Text style={styles.sheetTitle}>Choose Safest Route</Text>
-              <TouchableOpacity
-                style={styles.startNavActionBtn}
-                onPress={handleStartNavigation}
-                activeOpacity={0.8}
-              >
-                <MaterialCommunityIcons name="navigation" size={16} color={COLORS.white} />
-                <Text style={styles.startNavActionText}>Start Drive</Text>
-              </TouchableOpacity>
-            </View>
-            <ScrollView 
-              horizontal 
-              showsHorizontalScrollIndicator={false} 
-              contentContainerStyle={styles.comparisonScroll}
-              keyboardShouldPersistTaps="handled"
+            {/* Grab / Drag Handle */}
+            <TouchableOpacity
+              style={styles.dragHandleWrapper}
+              onPress={() => {
+                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                setIsSheetCollapsed(!isSheetCollapsed);
+              }}
+              activeOpacity={0.7}
+              accessible={true}
+              accessibilityRole="button"
+              accessibilityLabel={isSheetCollapsed ? 'Expand route details' : 'Collapse route details'}
             >
-              {(comparisons ?? []).map((comp) => {
-                const isSelected = selectedRouteIndex === comp.routeIndex;
-                const riskColor = comp.overallRisk === 'high' ? COLORS.red : 
-                                 comp.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green;
-                
-                return (
-                  <TouchableOpacity 
-                    key={comp.routeIndex} 
-                    onPress={() => selectRoute(comp.routeIndex)}
-                    activeOpacity={0.7}
-                    style={[
-                      styles.comparisonCard,
-                      isSelected && styles.activeCard,
-                      { borderColor: riskColor }
-                    ]}
+              <View style={styles.dragHandle} />
+            </TouchableOpacity>
+
+            {/* STATE 1: COLLAPSED PEEK MODE */}
+            {isSheetCollapsed ? (
+              <View style={styles.peekRow}>
+                <TouchableOpacity
+                  style={styles.peekInfo}
+                  onPress={() => {
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    setIsSheetCollapsed(false);
+                  }}
+                  activeOpacity={0.7}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel="Tap to expand route comparison"
+                >
+                  <View style={styles.peekTitleRow}>
+                    <Text style={styles.peekLabel} numberOfLines={1}>
+                      {currentComparison?.label || 'Route'}
+                    </Text>
+                    <View style={[styles.riskBadge, { backgroundColor: currentRiskColor + '25', borderColor: currentRiskColor, marginLeft: 8 }]}>
+                      <Text style={[styles.riskText, { color: currentRiskColor }]}>
+                        {currentComparison?.overallRisk.toUpperCase() || 'CLEAR'}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text style={styles.peekStats}>
+                    {Math.round(currentComparison?.totalDurationMinutes ?? 0)} min · {currentComparison?.totalDistanceKm.toFixed(1)} km
+                  </Text>
+                </TouchableOpacity>
+
+                <View style={styles.peekActions}>
+                  <TouchableOpacity
+                    style={styles.peekExpandBtn}
+                    onPress={() => {
+                      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                      setIsSheetCollapsed(false);
+                    }}
+                    accessible={true}
+                    accessibilityRole="button"
+                    accessibilityLabel="Expand route details"
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   >
-                    <View style={styles.cardHeader}>
-                      <Text style={styles.cardLabel}>{comp.label}</Text>
-                      <View style={[styles.riskBadge, { backgroundColor: riskColor + '20', borderColor: riskColor, borderWidth: 1 }]}>
-                        <Text style={[styles.riskText, { color: riskColor }]}>{comp.overallRisk.toUpperCase()}</Text>
+                    <MaterialCommunityIcons name="chevron-up" size={22} color={COLORS.white} />
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.peekStartBtn}
+                    onPress={handleStartNavigation}
+                    activeOpacity={0.8}
+                    accessible={true}
+                    accessibilityRole="button"
+                    accessibilityLabel="Start Drive"
+                  >
+                    <MaterialCommunityIcons
+                      name={currentRoute?.travelMode === 'flight' ? 'airplane' : 'navigation'}
+                      size={15}
+                      color={COLORS.white}
+                    />
+                    <Text style={styles.peekStartBtnText}>
+                      {currentRoute?.travelMode === 'flight' ? 'Fly' : 'Start'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : (
+              /* STATE 2: EXPANDED MODE */
+              <>
+                <View style={styles.sheetHeaderRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.sheetTitle}>
+                      {comparisons.length > 1 ? 'Choose Route' : 'Route Overview'}
+                    </Text>
+                    <Text style={styles.sheetSubtitle}>
+                      {comparisons.length > 1 
+                        ? 'Select route to preview hazard breakdown'
+                        : 'Hazard-checked driving trajectory'}
+                    </Text>
+                  </View>
+
+                  <View style={styles.headerControls}>
+                    <TouchableOpacity
+                      style={styles.headerControlBtn}
+                      onPress={() => {
+                        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                        setIsSheetCollapsed(true);
+                      }}
+                      accessible={true}
+                      accessibilityRole="button"
+                      accessibilityLabel="Collapse route sheet"
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    >
+                      <MaterialCommunityIcons name="chevron-down" size={20} color={COLORS.textSecondary} />
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.headerControlBtn, { marginLeft: 8 }]}
+                      onPress={() => {
+                        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                        setIsSheetDismissed(true);
+                      }}
+                      accessible={true}
+                      accessibilityRole="button"
+                      accessibilityLabel="Dismiss sheet to view full map"
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    >
+                      <MaterialCommunityIcons name="close" size={18} color={COLORS.textSecondary} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* Adaptive Content: Single Route Card vs Multi-route Horizontal Scroll */}
+                {comparisons.length === 1 ? (
+                  <View 
+                    style={styles.singleRouteCard}
+                    accessible={true}
+                    accessibilityRole="summary"
+                    accessibilityLabel={`Optimal path: ${Math.round(comparisons[0].totalDurationMinutes)} minutes, ${comparisons[0].totalDistanceKm.toFixed(1)} kilometers, ${comparisons[0].overallRisk} risk`}
+                  >
+                    <View style={styles.singleRouteHeader}>
+                      <View>
+                        <Text style={styles.singleRouteLabel}>Fastest & Safest Path</Text>
+                        <Text style={styles.durationText}>
+                          {Math.round(comparisons[0].totalDurationMinutes)} min
+                        </Text>
+                      </View>
+                      <View style={[styles.riskBadgeLarge, { backgroundColor: currentRiskColor + '20', borderColor: currentRiskColor }]}>
+                        <MaterialCommunityIcons 
+                          name={comparisons[0].overallRisk === 'high' ? 'weather-lightning-rainy' : comparisons[0].overallRisk === 'moderate' ? 'weather-partly-rainy' : 'shield-check'} 
+                          size={18} 
+                          color={currentRiskColor} 
+                        />
+                        <Text style={[styles.riskTextLarge, { color: currentRiskColor }]}>
+                          {comparisons[0].overallRisk.toUpperCase()} RISK
+                        </Text>
                       </View>
                     </View>
-                    
-                    <Text style={styles.durationText}>{Math.round(comp.totalDurationMinutes)} min</Text>
-                    <Text style={styles.distanceText}>{comp.totalDistanceKm.toFixed(1)} km</Text>
-                    
-                    {comp.extraMinutesVsPrimary > 0 && (
-                      <Text style={styles.extraText}>
-                        +{Math.round(comp.extraMinutesVsPrimary)} min {comp.overallRisk === 'clear' ? 'but safe' : ''}
-                      </Text>
-                    )}
-                    {comp.overallRisk === 'clear' && comp.extraMinutesVsPrimary > 0 && (
-                      <Text style={styles.recommendation}>✅ Recommended</Text>
-                    )}
 
-                    {isSelected && (
-                      <TouchableOpacity
-                        style={styles.cardStartBtn}
-                        onPress={handleStartNavigation}
-                        activeOpacity={0.8}
-                      >
-                        <MaterialCommunityIcons name="navigation" size={13} color={COLORS.white} />
-                        <Text style={styles.cardStartBtnText}>Start Drive</Text>
-                      </TouchableOpacity>
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
+                    <View style={styles.singleRouteMetaRow}>
+                      <Text style={styles.singleRouteMeta}>
+                        📍 {comparisons[0].totalDistanceKm.toFixed(1)} km
+                      </Text>
+                      <Text style={styles.singleRouteMeta}>
+                        🚦 {currentRoadConditions?.trafficStats.freePct ?? 90}% Smooth Flow
+                      </Text>
+                      {currentRoadConditions && currentRoadConditions.roadEvents.some(e => e.type === 'flood') ? (
+                        <Text style={[styles.singleRouteMeta, { color: TRAFFIC_COLORS.flooded }]}>
+                          🌊 Flood warning
+                        </Text>
+                      ) : (
+                        <Text style={[styles.singleRouteMeta, { color: COLORS.green }]}>
+                          🛡️ No water hazards
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+                ) : (
+                  <ScrollView 
+                    horizontal 
+                    showsHorizontalScrollIndicator={false} 
+                    contentContainerStyle={styles.comparisonScroll}
+                    keyboardShouldPersistTaps="handled"
+                  >
+                    {(comparisons ?? []).map((comp) => {
+                      const isSelected = selectedRouteIndex === comp.routeIndex;
+                      const isRecommended = comp.overallRisk === 'clear' && comp.extraMinutesVsPrimary >= 0;
+                      const riskColor = comp.overallRisk === 'high' ? COLORS.red : 
+                                       comp.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green;
+                      
+                      return (
+                        <TouchableOpacity 
+                          key={comp.routeIndex} 
+                          onPress={() => selectRoute(comp.routeIndex)}
+                          activeOpacity={0.7}
+                          accessible={true}
+                          accessibilityRole="radio"
+                          accessibilityState={{ selected: isSelected }}
+                          accessibilityLabel={`${comp.label}, ${Math.round(comp.totalDurationMinutes)} minutes, ${comp.totalDistanceKm.toFixed(1)} kilometers, risk: ${comp.overallRisk}`}
+                          style={[
+                            styles.comparisonCard,
+                            isSelected && styles.activeCard,
+                            { borderColor: isSelected ? COLORS.electricBlue : riskColor }
+                          ]}
+                        >
+                          <View style={styles.cardHeader}>
+                            <Text style={styles.cardLabel}>{comp.label}</Text>
+                            <View style={[styles.riskBadge, { backgroundColor: riskColor + '25', borderColor: riskColor }]}>
+                              <Text style={[styles.riskText, { color: riskColor }]}>{comp.overallRisk.toUpperCase()}</Text>
+                            </View>
+                          </View>
+                          
+                          <Text style={styles.durationText}>{Math.round(comp.totalDurationMinutes)} min</Text>
+                          <Text style={styles.distanceText}>{comp.totalDistanceKm.toFixed(1)} km</Text>
+                          
+                          {comp.extraMinutesVsPrimary > 0 ? (
+                            <Text style={styles.extraText}>
+                              +{Math.round(comp.extraMinutesVsPrimary)} min vs primary
+                            </Text>
+                          ) : (
+                            <Text style={styles.primaryRouteTag}>Fastest path</Text>
+                          )}
+
+                          {/* R-14 Hierarchy: Recommended badge */}
+                          {isRecommended && (
+                            <View style={styles.recommendationBadge}>
+                              <MaterialCommunityIcons name="shield-check" size={13} color={COLORS.green} style={{ marginRight: 3 }} />
+                              <Text style={styles.recommendation}>Safest Route</Text>
+                            </View>
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                )}
+
+                {/* Single Primary Action Button */}
+                <TouchableOpacity
+                  style={styles.startNavActionBtn}
+                  onPress={handleStartNavigation}
+                  activeOpacity={0.8}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel="Start Drive"
+                  accessibilityHint="Begins turn-by-turn guidance and live weather tracking"
+                >
+                  <MaterialCommunityIcons
+                    name={currentRoute?.travelMode === 'flight' ? 'airplane' : 'navigation'}
+                    size={20}
+                    color={COLORS.white}
+                  />
+                  <Text style={styles.startNavActionText}>
+                    {currentRoute?.travelMode === 'flight' ? 'Start Flight' : 'Start Drive'}
+                    {currentComparison ? ` · ${Math.round(currentComparison.totalDurationMinutes)} min` : ''}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            )}
           </BlurView>
         </View>
+      )}
+
+      {/* STATE 3: DISMISSED (Floating Route Pill to easily restore bottom sheet) */}
+      {!isNavigating && comparisons?.length > 0 && isSheetDismissed && (
+        <TouchableOpacity
+          style={styles.floatingRoutePill}
+          onPress={() => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setIsSheetDismissed(false);
+            setIsSheetCollapsed(false);
+          }}
+          activeOpacity={0.85}
+          accessible={true}
+          accessibilityRole="button"
+          accessibilityLabel="Restore route comparison sheet"
+        >
+          <MaterialCommunityIcons name="map-marker-path" size={18} color={COLORS.electricBlue} />
+          <Text style={styles.floatingRoutePillText}>
+            {Math.round(currentComparison?.totalDurationMinutes ?? 0)} min
+          </Text>
+          <View style={[styles.riskDot, { backgroundColor: currentRiskColor }]} />
+          <MaterialCommunityIcons name="chevron-up" size={18} color={COLORS.textSecondary} />
+        </TouchableOpacity>
       )}
 
       {/* ACTIVE NAVIGATION HUD */}
@@ -912,6 +1821,7 @@ export default function MapScreen() {
           remainingDistanceKm={remainingDistanceKm}
           currentSpeedKph={currentSpeedKph}
           upcomingHazard={upcomingHazard}
+          upcomingRoadHazard={upcomingRoadHazard}
           isSimulating={isSimulating}
           simulationSpeed={simulationSpeed}
           isMuted={isMuted}
@@ -921,79 +1831,733 @@ export default function MapScreen() {
           onToggleMute={() => setIsMuted(!isMuted)}
           onRecenter={handleRecenterCamera}
           onExitNavigation={handleExitNavigation}
+          onChangeDestination={() => setIsRerouteModalVisible(true)}
         />
       )}
+
+      {/* IN-DRIVE REROUTE MODAL (Google Maps style) */}
+      <Modal
+        visible={isRerouteModalVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setIsRerouteModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.rerouteModalOverlay}
+        >
+          <View style={styles.rerouteModalContainer}>
+            <View style={styles.rerouteModalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rerouteModalTitle}>Change Destination</Text>
+                <Text style={styles.rerouteModalSubtitle}>
+                  Current location will be set as starting point
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.rerouteCloseBtn}
+                onPress={() => setIsRerouteModalVisible(false)}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel changing destination"
+              >
+                <MaterialCommunityIcons name="close" size={22} color={COLORS.white} />
+              </TouchableOpacity>
+            </View>
+
+            <LocationSearchInput
+              label="New Destination"
+              placeholder="Search new destination..."
+              value=""
+              onSelect={(lat, lon, label) => {
+                handleInDriveReroute({ lat, lon, label });
+              }}
+            />
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.navy },
-  map: { width: '100%', height: '100%' },
-  inputWrapper: { position: 'absolute', top: 50, left: 16, right: 16, zIndex: 100 },
-  blurContainer: { borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)' },
+  map: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+  },
+  // R-03: Responsive positioning utilizing dynamic safe area insets
+  inputWrapper: { position: 'absolute', left: 16, right: 16, zIndex: 100 },
+  // R-10: Single controlled blur layer for map readability without visual clutter
+  blurContainer: { borderRadius: RADII.lg, overflow: 'hidden', borderWidth: 1, borderColor: COLORS.borderSubtle },
   inputContainer: { padding: 16 },
-  divider: { backgroundColor: 'rgba(255,255,255,0.1)', marginVertical: 8 },
-  button: { backgroundColor: COLORS.electricBlue, height: 50, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 16 },
+  divider: { backgroundColor: COLORS.borderSubtle, marginVertical: 8 },
+  // R-03: Minimum 50px touch target
+  button: {
+    backgroundColor: COLORS.electricBlue,
+    minHeight: 50,
+    borderRadius: RADII.md,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  buttonLoadingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   buttonText: { color: COLORS.white, fontSize: 16, fontWeight: '700' },
-  bottomSheet: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 260 },
-  bottomBlur: { flex: 1, padding: 20, borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden' },
-  sheetHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  sheetTitle: { color: '#fff', fontSize: 18, fontWeight: '800' },
-  startNavActionBtn: {
+  collapseHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginBottom: 6,
+  },
+  collapseSearchBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.electricBlue,
-    paddingVertical: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: RADII.sm,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  collapseSearchText: {
+    color: COLORS.electricBlue,
+    fontSize: 12,
+    fontWeight: '700',
+    marginRight: 2,
+  },
+  compactRouteBar: {
+    borderRadius: RADII.lg,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: COLORS.borderSubtle,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
     paddingHorizontal: 12,
-    borderRadius: 20,
+  },
+  compactClearBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
+  },
+  compactContent: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  compactEndpointsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  compactOriginText: {
+    color: COLORS.white,
+    fontSize: 14,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  compactDestText: {
+    color: COLORS.white,
+    fontSize: 14,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  compactSubtext: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  compactEditBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(59, 130, 246, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 8,
+  },
+  // R-27: Inline error banner
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.red,
+    marginTop: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: RADII.md,
+  },
+  errorText: { flex: 1, color: COLORS.white, fontSize: 13, fontWeight: '600' },
+  // R-03: Bottom sheet with dynamic safe area inset padding
+  bottomSheet: { position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 100 },
+  bottomBlur: {
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    paddingBottom: 12,
+    borderTopLeftRadius: RADII.xl,
+    borderTopRightRadius: RADII.xl,
+    borderTopWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    overflow: 'hidden',
+  },
+  dragHandleWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingVertical: 12,
+  },
+  dragHandle: {
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255, 255, 255, 0.35)',
+  },
+  // --- Collapsed (Peek) Mode Styles ---
+  peekRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  peekInfo: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  peekTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  peekLabel: {
+    color: COLORS.white,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  peekStats: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+  peekActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  peekExpandBtn: {
+    minWidth: 44,
+    minHeight: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 6,
+  },
+  peekStartBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.electricBlue,
+    minHeight: 44,
+    paddingHorizontal: 16,
+    borderRadius: RADII.md,
     shadowColor: COLORS.electricBlue,
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
+    shadowOpacity: 0.3,
     shadowRadius: 4,
     elevation: 3,
   },
-  startNavActionText: { color: COLORS.white, fontWeight: '800', fontSize: 13, marginLeft: 4 },
-  comparisonScroll: { paddingRight: 20 },
-  comparisonCard: { backgroundColor: 'rgba(255,255,255,0.05)', width: 160, borderRadius: 16, padding: 15, marginRight: 12, borderWidth: 1 },
-  activeCard: { backgroundColor: 'rgba(59, 130, 246, 0.1)', borderWidth: 2 },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  cardLabel: { color: '#fff', fontSize: 12, fontWeight: '600', opacity: 0.7 },
-  riskBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  riskText: { color: '#fff', fontSize: 8, fontWeight: '900' },
-  durationText: { color: '#fff', fontSize: 24, fontWeight: '800' },
-  distanceText: { color: COLORS.gray, fontSize: 13, marginBottom: 8 },
-  extraText: { color: COLORS.yellow, fontSize: 11, fontWeight: '600' },
-  recommendation: { color: COLORS.green, fontSize: 11, fontWeight: '700', marginTop: 4 },
-  cardStartBtn: {
+  peekStartBtnText: {
+    color: COLORS.white,
+    fontWeight: '800',
+    fontSize: 14,
+    marginLeft: 6,
+  },
+  // --- Expanded Mode Styles ---
+  sheetHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  headerControls: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.electricBlue,
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    borderRadius: 8,
-    marginTop: 6,
-    alignSelf: 'flex-start',
+    marginTop: 2,
   },
-  cardStartBtnText: { color: COLORS.white, fontSize: 11, fontWeight: '800', marginLeft: 4 },
+  headerControlBtn: {
+    minWidth: 44,
+    minHeight: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sheetTitle: { color: COLORS.white, fontSize: 18, fontWeight: '800' },
+  sheetSubtitle: { color: COLORS.textMuted, fontSize: 12, marginTop: 2 },
+  // --- Adaptive Single Route Card Styles ---
+  singleRouteCard: {
+    backgroundColor: COLORS.surfaceElevated,
+    borderRadius: RADII.lg,
+    padding: 14,
+    borderWidth: 1.5,
+    borderColor: COLORS.electricBlue,
+    marginBottom: 4,
+  },
+  singleRouteHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  singleRouteLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  singleRouteMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginTop: 4,
+  },
+  singleRouteMeta: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  riskBadgeLarge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: RADII.sm,
+    borderWidth: 1,
+    gap: 4,
+  },
+  riskTextLarge: {
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  // --- Dismissed Mode: Floating Route Pill ---
+  floatingRoutePill: {
+    position: 'absolute',
+    bottom: 20,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
+    minHeight: 48,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 24,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    elevation: 6,
+    zIndex: 90,
+  },
+  floatingRoutePillText: {
+    color: COLORS.white,
+    fontSize: 14,
+    fontWeight: '800',
+    marginLeft: 6,
+    marginRight: 8,
+  },
+  riskDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  // R-03: Minimum 48px tap target with clean neutral elevation
+  startNavActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.electricBlue,
+    minHeight: 48,
+    marginTop: 10,
+    marginBottom: 2,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: RADII.md,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  startNavActionText: { color: COLORS.white, fontWeight: '800', fontSize: 15, marginLeft: 8, letterSpacing: 0.3 },
+  comparisonScroll: { paddingRight: 20, paddingBottom: 6, paddingTop: 4 },
+  // R-14 & R-25: High-contrast card with 164px width and accessible typography
+  comparisonCard: {
+    backgroundColor: COLORS.surfaceElevated,
+    width: 164,
+    borderRadius: RADII.lg,
+    padding: 14,
+    marginRight: 12,
+    borderWidth: 1.5,
+    minHeight: 140,
+    justifyContent: 'space-between',
+  },
+  activeCard: { backgroundColor: 'rgba(59, 130, 246, 0.15)', borderWidth: 2 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  // R-25: Contrast ratio >= 10:1
+  cardLabel: { color: COLORS.textSecondary, fontSize: 13, fontWeight: '700' },
+  riskBadge: { paddingHorizontal: 6, paddingVertical: 3, borderRadius: RADII.sm, borderWidth: 1 },
+  riskText: { fontSize: 9, fontWeight: '900' },
+  durationText: { color: COLORS.white, fontSize: 24, fontWeight: '800' },
+  distanceText: { color: COLORS.textSecondary, fontSize: 13, marginTop: 2, marginBottom: 6 },
+  extraText: { color: COLORS.yellow, fontSize: 11, fontWeight: '600' },
+  primaryRouteTag: { color: COLORS.textMuted, fontSize: 11, fontWeight: '600' },
+  recommendationBadge: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
+  recommendation: { color: COLORS.green, fontSize: 11, fontWeight: '700' },
   alertMarker: { alignItems: 'center' },
-  summaryBanner: { marginTop: 8, padding: 12, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  summaryText: { color: COLORS.navy, fontWeight: '800', fontSize: 14 },
-  navVehicleContainer: { width: 48, height: 48, justifyContent: 'center', alignItems: 'center' },
-  navVehiclePulse: { position: 'absolute', width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(59, 130, 246, 0.3)' },
+  // R-25: WCAG AA compliant text color based on risk severity
+  summaryBanner: {
+    flexDirection: 'row',
+    marginTop: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: RADII.md,
+    alignItems: 'center',
+  },
+  summaryText: { fontWeight: '700', fontSize: 13, flex: 1 },
+  navVehicleContainer: { width: 60, height: 60, justifyContent: 'center', alignItems: 'center' },
+  navVehiclePulse: { position: 'absolute', width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(0, 210, 255, 0.28)', borderWidth: 2, borderColor: 'rgba(0, 210, 255, 0.65)' },
   navVehicleIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#0284C7',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2.5,
+    borderColor: COLORS.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.5,
+    shadowRadius: 4.5,
+    elevation: 10,
+  },
+  roadEventMarker: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
+    borderWidth: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  trafficLegendWrapper: {
+    position: 'absolute',
+    left: 16,
+    zIndex: 90,
+  },
+  trafficLegendBlur: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: RADII.md,
+    borderWidth: 1,
+    borderColor: COLORS.borderSubtle,
+    overflow: 'hidden',
+    gap: 10,
+  },
+  trafficLegendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  legendBar: {
+    width: 14,
+    height: 4,
+    borderRadius: 2,
+    marginRight: 4,
+  },
+  legendText: {
+    color: COLORS.white,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  // Destination and Origin Pin Marker Styles
+  destinationMarkerContainer: {
+    width: 90,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+  },
+  destinationLabelPill: {
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1.5,
+    borderColor: '#EF4444',
+    marginBottom: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  destinationLabelPillText: {
+    color: COLORS.white,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+  },
+  destinationMarkerBadge: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#EF4444',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2.5,
+    borderColor: COLORS.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+    elevation: 6,
+  },
+  destinationMarkerStem: {
+    width: 3,
+    height: 8,
+    backgroundColor: '#EF4444',
+    marginTop: -1,
+  },
+  destinationMarkerDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    marginTop: 1,
+  },
+  markingBanner: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    alignItems: 'center',
+    zIndex: 95,
+  },
+  markingBannerBlur: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: RADII.lg,
+    borderWidth: 1.5,
+    borderColor: '#EF4444',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 5,
+    elevation: 8,
+  },
+  markingBannerText: {
+    color: COLORS.white,
+    fontSize: 13,
+    fontWeight: '700',
+    flex: 1,
+  },
+  markingCancelBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
+  originMarkerContainer: {
+    width: 44,
+    height: 52,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+  },
+  originMarkerBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: COLORS.electricBlue,
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 2,
     borderColor: COLORS.white,
     shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 3,
+    elevation: 5,
+  },
+  originMarkerStem: {
+    width: 3,
+    height: 7,
+    backgroundColor: COLORS.electricBlue,
+    marginTop: -1,
+  },
+  originMarkerDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    marginTop: 1,
+  },
+  // --- Swap Endpoints Button Styles ---
+  swapEndpointsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 4,
+    position: 'relative',
+  },
+  swapDivider: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  swapEndpointsBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(30, 41, 59, 0.95)',
+    borderWidth: 1.5,
+    borderColor: COLORS.electricBlue,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginHorizontal: 8,
+    shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  // --- Context Pin Floating Action Card (Long-Press on Map) ---
+  contextPinCardContainer: {
+    position: 'absolute',
+    bottom: 30,
+    left: 16,
+    right: 16,
+    zIndex: 950,
+  },
+  contextPinCard: {
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  contextPinHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  contextPinTitle: {
+    flex: 1,
+    color: COLORS.white,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  contextPinCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  contextPinActionsRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  contextPinOriginBtn: {
+    flex: 1,
+    minHeight: 46,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.electricBlue,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+  },
+  contextPinOriginBtnText: {
+    color: COLORS.white,
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  contextPinDestBtn: {
+    flex: 1,
+    minHeight: 46,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EF4444',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+  },
+  contextPinDestBtnText: {
+    color: COLORS.white,
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  // --- In-Drive Reroute Modal Styles ---
+  rerouteModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    justifyContent: 'flex-end',
+  },
+  rerouteModalContainer: {
+    backgroundColor: COLORS.surfaceElevated,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    paddingBottom: 36,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 10,
+  },
+  rerouteModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  rerouteModalTitle: {
+    color: COLORS.white,
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  rerouteModalSubtitle: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    marginTop: 2,
+  },
+  rerouteCloseBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

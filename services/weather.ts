@@ -1,6 +1,5 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { parseISO, differenceInMinutes } from 'date-fns';
 import { RAIN_THRESHOLD } from '../utils/constants';
 import { getProxyBaseUrl } from '../utils/proxyUrl';
 
@@ -39,9 +38,12 @@ export const fetchWeatherAtPoint = async (
   lon: number,
   etaISO: string
 ): Promise<WeatherPointResponse | null> => {
-  const arrivalTime = parseISO(etaISO);
-  const hour = arrivalTime.getHours();
-  const day = arrivalTime.getDate();
+  // Parse arrival time in UTC epoch ms (handles both with and without trailing Z)
+  const arrivalIso = etaISO.endsWith('Z') ? etaISO : (etaISO.length === 16 ? `${etaISO}:00Z` : `${etaISO}Z`);
+  const arrivalTime = new Date(arrivalIso);
+  const arrivalMs = arrivalTime.getTime();
+  const hour = arrivalTime.getUTCHours();
+  const day = arrivalTime.getUTCDate();
   const cacheKey = `weather_cache_${lat.toFixed(3)}_${lon.toFixed(3)}_${day}_${hour}`;
 
   // 1. Check Cache
@@ -55,8 +57,8 @@ export const fetchWeatherAtPoint = async (
     console.warn('Cache read error:', e);
   }
 
-  // 2. Fetch directly from proxy
-  const url = `${WEATHER_BASE}?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode,windspeed_10m,temperature_2m&timezone=auto&forecast_days=2`;
+  // 2. Fetch directly from proxy (use UTC to match UTC etaISO timestamps)
+  const url = `${WEATHER_BASE}?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode,windspeed_10m,temperature_2m&timezone=UTC&forecast_days=2`;
 
   try {
     let data: any;
@@ -65,7 +67,7 @@ export const fetchWeatherAtPoint = async (
       data = res.data;
     } catch (proxyErr) {
       console.warn(`[Weather] Proxy failed, fetching direct from Open-Meteo for (${lat}, ${lon})`);
-      const directUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode,windspeed_10m,temperature_2m&timezone=auto&forecast_days=2`;
+      const directUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=precipitation_probability,precipitation,weathercode,windspeed_10m,temperature_2m&timezone=UTC&forecast_days=2`;
       try {
         const fetchRes = await fetch(directUrl, {
           headers: { Accept: 'application/json' },
@@ -87,16 +89,17 @@ export const fetchWeatherAtPoint = async (
     let minDiff = Infinity;
 
     for (let i = 0; i < hourly.time.length; i++) {
-      const forecastTime = parseISO(hourly.time[i]);
-      const diff = Math.abs(differenceInMinutes(arrivalTime, forecastTime));
+      const forecastIso = hourly.time[i].endsWith('Z') ? hourly.time[i] : `${hourly.time[i]}:00Z`;
+      const forecastMs = new Date(forecastIso).getTime();
+      const diff = Math.abs((arrivalMs - forecastMs) / (60 * 1000));
       if (diff < minDiff) {
         minDiff = diff;
         closestIndex = i;
       }
     }
 
-    if (closestIndex === -1 || minDiff > 30) {
-      console.warn(`[Weather] No suitable forecast found within 30 min of ${etaISO} at ${lat}, ${lon}`);
+    if (closestIndex === -1 || minDiff > 60) {
+      console.warn(`[Weather] No suitable forecast found within 60 min of ${etaISO} at ${lat}, ${lon}`);
       return null;
     }
 

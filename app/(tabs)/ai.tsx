@@ -2,7 +2,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, StyleSheet, TouchableOpacity, Animated, SafeAreaView, ActivityIndicator } from 'react-native';
 import { Text } from 'react-native-paper';
 import { Ionicons } from '@expo/vector-icons';
-import { Audio } from 'expo-av';
+import {
+  useAudioRecorder,
+  AudioModule,
+  RecordingPresets,
+  setAudioModeAsync,
+  useAudioRecorderState,
+} from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Speech from 'expo-speech';
 import { useWeatherStore } from '../../store/useWeatherStore';
@@ -12,10 +18,13 @@ type AiState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
 export default function AiAssistantScreen() {
   const [uiState, setUiState] = useState<AiState>('idle');
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [aiResponse, setAiResponse] = useState('');
   
   const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  // expo-audio recorder hook
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorderState = useAudioRecorderState(audioRecorder);
 
   // Zustand Store
   const summary = useWeatherStore((s) => s.summary);
@@ -25,12 +34,20 @@ export default function AiAssistantScreen() {
   useEffect(() => {
     // Request permissions on mount
     (async () => {
-      await Audio.requestPermissionsAsync();
+      const status = await AudioModule.requestRecordingPermissionsAsync();
+      if (!status.granted) {
+        console.warn('[AI] Microphone permission denied');
+      }
+
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: true,
+      });
     })();
     
     return () => {
-      if (recording) {
-        recording.stopAndUnloadAsync();
+      if (recorderState.isRecording) {
+        audioRecorder.stop();
       }
       if (recordingTimeoutRef.current) {
         clearTimeout(recordingTimeoutRef.current);
@@ -56,22 +73,21 @@ export default function AiAssistantScreen() {
   const recordingStartTime = useRef<number>(0);
   const recordingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const stopAndProcessRecording = async (rec: Audio.Recording) => {
+  const stopAndProcessRecording = async () => {
     setUiState('thinking');
     try {
       const duration = Date.now() - recordingStartTime.current;
-      await rec.stopAndUnloadAsync();
-      const uri = rec.getURI();
-      setRecording(null);
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
 
       // Reset audio mode so TTS/playback works on Android
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
       });
 
       if (!uri) {
-        setAiResponse('Recording failed — no audio file was created.');
+        setAiResponse('Recording failed - no audio file was created.');
         setUiState('idle');
         return;
       }
@@ -98,33 +114,31 @@ export default function AiAssistantScreen() {
       return;
     }
 
-    if (uiState === 'listening' && recording) {
+    if (uiState === 'listening') {
       // User tapped to stop manually
       if (recordingTimeoutRef.current) {
         clearTimeout(recordingTimeoutRef.current);
         recordingTimeoutRef.current = null;
       }
-      await stopAndProcessRecording(recording);
+      await stopAndProcessRecording();
     } else if (uiState === 'idle' || uiState === 'thinking') {
       // Start listening
       setAiResponse('');
       Speech.stop();
       try {
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: true,
-          playsInSilentModeIOS: true,
+        await setAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
         });
-        const { recording: newRecording } = await Audio.Recording.createAsync(
-          Audio.RecordingOptionsPresets.HIGH_QUALITY
-        );
-        setRecording(newRecording);
+        await audioRecorder.prepareToRecordAsync();
+        audioRecorder.record();
         recordingStartTime.current = Date.now();
         setUiState('listening');
 
         // Auto-stop after 30 seconds to prevent hanging
         recordingTimeoutRef.current = setTimeout(async () => {
           console.log('[AI] Auto-stopping recording after 30s');
-          await stopAndProcessRecording(newRecording);
+          await stopAndProcessRecording();
         }, 30000);
       } catch (e: any) {
         console.error('Failed to start recording', e);
@@ -287,3 +301,4 @@ const styles = StyleSheet.create({
   responseArea: { flex: 1, paddingTop: 30, paddingHorizontal: 20, alignItems: 'center' },
   responseText: { color: '#E2E8F0', fontSize: 18, textAlign: 'center', lineHeight: 28 },
 });
+
