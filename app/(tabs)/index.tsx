@@ -1,27 +1,27 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, ActivityIndicator, Alert, ScrollView, LayoutAnimation, Platform, Modal, KeyboardAvoidingView } from 'react-native';
-import MapView, { Polyline, Marker, UrlTile } from 'react-native-maps';
-import * as Location from 'expo-location';
-import { BlurView } from 'expo-blur';
-import { useFocusEffect } from 'expo-router';
-import { Text, Divider } from 'react-native-paper';
-import { fetchAlternativeRoutes, RouteStep } from '../../services/osrm';
-import { useWeatherAlerts } from '../../hooks/useWeatherAlerts';
-import { LocationSearchInput } from '../../components/LocationSearchInput';
-import { useWeatherStore } from '../../store/useWeatherStore';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getProxyBaseUrl } from '../../utils/proxyUrl';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { NavigationHUD } from '../../components/NavigationHUD';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { BlurView } from 'expo-blur';
+import * as Location from 'expo-location';
+import { useFocusEffect } from 'expo-router';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, BackHandler, KeyboardAvoidingView, LayoutAnimation, Modal, Platform, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
+import MapView, { Marker, Polyline, UrlTile } from 'react-native-maps';
+import { Divider, Text } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { analyzeRouteRoadConditions, TRAFFIC_COLORS, RoadEvent } from '../../services/roadEvents';
+import { LocationSearchInput } from '../../components/LocationSearchInput';
+import { NavigationHUD } from '../../components/NavigationHUD';
+import { useWeatherAlerts } from '../../hooks/useWeatherAlerts';
 import {
   calculateBearing,
-  haversineDistanceMeters,
   findUpcomingHazard,
-  speakGuidance,
   formatWeatherWarningSpeech,
+  haversineDistanceMeters,
+  speakGuidance,
 } from '../../services/navigation';
+import { fetchAlternativeRoutes, RouteStep } from '../../services/osrm';
+import { analyzeRouteRoadConditions, RoadEvent, TRAFFIC_COLORS } from '../../services/roadEvents';
+import { useWeatherStore } from '../../store/useWeatherStore';
+import { getProxyBaseUrl } from '../../utils/proxyUrl';
 
 const LAST_KNOWN_LOCATION_KEY = 'last_known_location';
 
@@ -149,7 +149,7 @@ export default function MapScreen() {
       clearStoreState();
     }
   }, [destination?.lat, destination?.lon, origin?.lat, origin?.lon]);
-  
+
   const comparisons = useWeatherStore((s) => s.comparisons);
   const selectedRouteIndex = useWeatherStore((s) => s.selectedRouteIndex);
   const clearStoreState = useWeatherStore((s) => s.clearRouteState);
@@ -159,6 +159,7 @@ export default function MapScreen() {
 
   // Navigation Mode States
   const [isNavigating, setIsNavigating] = useState(false);
+  const [isArrived, setIsArrived] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [simulationSpeed, setSimulationSpeed] = useState(1);
   const [driverCoord, setDriverCoord] = useState<{ lat: number; lon: number } | null>(null);
@@ -213,6 +214,7 @@ export default function MapScreen() {
 
     lastWarnedHazardKeyRef.current = '';
     setIsNavigating(true);
+    setIsArrived(false);
     setIsSimulating(false);
     setDriverCoord(startCoord);
     setDriverHeading(initialHeading);
@@ -228,10 +230,12 @@ export default function MapScreen() {
     }
   };
 
-  const handleExitNavigation = () => {
+  const handleExitNavigation = (shouldClearSession?: boolean | any) => {
+    const doClear = shouldClearSession !== false;
     lastWarnedHazardKeyRef.current = '';
     setIsNavigating(false);
     setIsSimulating(false);
+    setIsArrived(false);
     if (simulationIntervalRef.current) {
       clearInterval(simulationIntervalRef.current);
       simulationIntervalRef.current = null;
@@ -241,6 +245,53 @@ export default function MapScreen() {
       locationSubscriptionRef.current = null;
     }
 
+    if (typeof (mapRef.current as any)?.animateCamera === 'function') {
+      (mapRef.current as any).animateCamera({ pitch: 0, heading: 0 });
+    }
+
+    if (doClear) {
+      routeGenerationRef.current += 1;
+      lastCalculatedEndpointsRef.current = '';
+      setRouteCalculationId((prev) => prev + 1);
+      setMapFocusKey((prev) => prev + 1);
+      setIsMarkingDestination(false);
+      setIsMarkingOrigin(false);
+      setContextPinCoords(null);
+      setDestination(null);
+      setOrigin(null);
+      setDriverCoord(null);
+      setAllRoutes([]);
+      clearStoreState();
+      setLoadingState('');
+      setRouteError(null);
+      setIsSearchExpanded(true);
+      setIsSheetCollapsed(false);
+      setIsSheetDismissed(false);
+
+      if (userLocation) {
+        mapRef.current?.animateToRegion(
+          {
+            latitude: userLocation.coords.latitude,
+            longitude: userLocation.coords.longitude,
+            latitudeDelta: 0.05,
+            longitudeDelta: 0.05,
+          },
+          800
+        );
+      }
+    } else if (allRoutes[selectedRouteIndex]) {
+      const points = allRoutes[selectedRouteIndex].coordinates.map((p: any) => ({
+        latitude: p.lat,
+        longitude: p.lon,
+      }));
+      mapRef.current?.fitToCoordinates(points, {
+        edgePadding: { top: 100, right: 100, bottom: 300, left: 100 },
+        animated: true,
+      });
+    }
+  };
+
+  const handleRouteOverview = () => {
     if (allRoutes[selectedRouteIndex]) {
       const points = allRoutes[selectedRouteIndex].coordinates.map((p: any) => ({
         latitude: p.lat,
@@ -250,10 +301,24 @@ export default function MapScreen() {
         (mapRef.current as any).animateCamera({ pitch: 0, heading: 0 });
       }
       mapRef.current?.fitToCoordinates(points, {
-        edgePadding: { top: 100, right: 100, bottom: 300, left: 100 },
+        edgePadding: { top: 120, right: 80, bottom: 280, left: 80 },
         animated: true,
       });
     }
+  };
+
+  const handleExitAndPlanNewRoute = (newDest?: Point) => {
+    const startPoint = driverCoord || (userLocation ? { lat: userLocation.coords.latitude, lon: userLocation.coords.longitude } : origin);
+    handleExitNavigation(false);
+    setAllRoutes([]);
+    clearStoreState();
+    if (startPoint) {
+      setOrigin({ lat: startPoint.lat, lon: startPoint.lon, label: 'Current Location' });
+    }
+    if (newDest) {
+      setDestination(newDest);
+    }
+    setIsSearchExpanded(true);
   };
 
   const handleRecenterCamera = () => {
@@ -262,31 +327,38 @@ export default function MapScreen() {
   };
 
   const clearRouteState = () => {
-    if (isNavigating) {
-      handleExitNavigation();
-    }
-    setRouteCalculationId((prev) => prev + 1);
-    setIsMarkingDestination(false);
-    setIsMarkingOrigin(false);
-    setContextPinCoords(null);
-    setAllRoutes([]);
-    clearStoreState();
-    setLoadingState('');
-    setRouteError(null);
-    setIsSearchExpanded(true);
-    setIsSheetCollapsed(false);
-    setIsSheetDismissed(false);
+    handleExitNavigation(true);
   };
+
+  // Handle Android hardware/system back button during active navigation
+  useEffect(() => {
+    if (!isNavigating) return;
+
+    const backAction = () => {
+      Alert.alert(
+        'End Navigation?',
+        'Do you want to stop current navigation?',
+        [
+          { text: 'Keep Driving', style: 'cancel' },
+          { text: 'End Trip', style: 'destructive', onPress: () => handleExitNavigation(true) },
+        ]
+      );
+      return true;
+    };
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
+    return () => backHandler.remove();
+  }, [isNavigating]);
 
   // Smoothly focus on the route whenever the selection changes (only when not navigating)
   useEffect(() => {
     if (isNavigating) return;
     if (allRoutes.length > 0 && allRoutes[selectedRouteIndex]) {
-      const points = allRoutes[selectedRouteIndex].coordinates.map((p: any) => ({ 
-        latitude: p.lat, 
-        longitude: p.lon 
+      const points = allRoutes[selectedRouteIndex].coordinates.map((p: any) => ({
+        latitude: p.lat,
+        longitude: p.lon
       }));
-      
+
       mapRef.current?.fitToCoordinates(points, {
         edgePadding: { top: 100, right: 100, bottom: 300, left: 100 },
         animated: true,
@@ -317,6 +389,7 @@ export default function MapScreen() {
         if (nextIndex >= coords.length) {
           speakGuidance('You have reached your destination.', isMuted);
           setIsSimulating(false);
+          setIsArrived(true);
           return prevIndex;
         }
 
@@ -407,6 +480,15 @@ export default function MapScreen() {
               }
               return stepIdx;
             });
+
+            // Destination arrival detection in live navigation
+            if (destination && !isArrived) {
+              const distToDest = haversineDistanceMeters(newCoord, { lat: destination.lat, lon: destination.lon });
+              if (distToDest < 40) {
+                speakGuidance('You have reached your destination.', isMuted);
+                setIsArrived(true);
+              }
+            }
 
             // Automatic Off-Route Detection (> 75m deviation from planned route)
             if (activeRoute?.coordinates && activeRoute.coordinates.length > 1 && destination && !isReroutingRef.current) {
@@ -527,10 +609,10 @@ export default function MapScreen() {
 
         // 2. Fetch fresh position with Balanced accuracy and 5s timeout
         const location = await Promise.race([
-          Location.getCurrentPositionAsync({ 
-            accuracy: Location.Accuracy.Balanced 
+          Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced
           }),
-          new Promise<null>((_, reject) => 
+          new Promise<null>((_, reject) =>
             setTimeout(() => reject(new Error('Timeout')), 5000)
           )
         ]) as Location.LocationObject;
@@ -699,8 +781,8 @@ export default function MapScreen() {
         const cleanLabel = segments.length > 3
           ? `${segments[0]}, ${segments[segments.length - 1]}`
           : segments.length > 2
-          ? `${segments[0]}, ${segments[1]}, ${segments[2]}`
-          : data.display_name;
+            ? `${segments[0]}, ${segments[1]}, ${segments[2]}`
+            : data.display_name;
 
         setDestination({
           lat: latitude,
@@ -760,8 +842,8 @@ export default function MapScreen() {
         const cleanLabel = segments.length > 3
           ? `${segments[0]}, ${segments[segments.length - 1]}`
           : segments.length > 2
-          ? `${segments[0]}, ${segments[1]}, ${segments[2]}`
-          : data.display_name;
+            ? `${segments[0]}, ${segments[1]}, ${segments[2]}`
+            : data.display_name;
 
         setOrigin({
           lat: latitude,
@@ -817,16 +899,16 @@ export default function MapScreen() {
       const sortedRoutes = fetchedRoutes
         .sort((a, b) => a.totalDurationMinutes - b.totalDurationMinutes)
         .slice(0, 3);
-      
+
       setAllRoutes(sortedRoutes);
       setRouteLabels(origin.label, destination.label);
-      
+
       setLoadingState('Checking weather along route...');
       const comparisonResults = await compareRoutes(sortedRoutes);
 
       // Check again after weather analysis — another calculation may have started
       if (routeGenerationRef.current !== thisGeneration) return;
-      
+
       setLoadingState('Routes ready');
       setIsSearchExpanded(false);
       setIsSheetCollapsed(false);
@@ -837,7 +919,7 @@ export default function MapScreen() {
       const safest = comparisonResults[0];
 
       const points = sortedRoutes[safest.routeIndex].coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }));
-      
+
       // Provide generous padding so the route isn't hidden behind UI elements
       mapRef.current?.fitToCoordinates(points, {
         edgePadding: { top: 100, right: 100, bottom: 300, left: 100 },
@@ -911,8 +993,21 @@ export default function MapScreen() {
   const currentRiskColor = currentComparison?.overallRisk === 'high'
     ? COLORS.red
     : currentComparison?.overallRisk === 'moderate'
-    ? COLORS.yellow
-    : COLORS.green;
+      ? COLORS.yellow
+      : COLORS.green;
+
+  const riskRank = { clear: 0, moderate: 1, high: 2 } as const;
+  const saferAlternative = isNavigating && currentComparison
+    ? comparisons.find(
+        (c) => c.routeIndex !== selectedRouteIndex && riskRank[c.overallRisk] < riskRank[currentComparison.overallRisk]
+      )
+    : undefined;
+
+  const handleAcceptSaferRoute = () => {
+    if (!saferAlternative) return;
+    speakGuidance('Switching to safer route.', isMuted);
+    selectRoute(saferAlternative.routeIndex);
+  };
 
   // Road condition & traffic analysis (congestion, floods, road hazards)
   const currentRoadConditions = useMemo(() => {
@@ -929,15 +1024,47 @@ export default function MapScreen() {
 
   const distanceToNextStepMeters = driverCoord && currentStep
     ? haversineDistanceMeters(driverCoord, {
-        lat: currentStep.maneuver?.location ? currentStep.maneuver.location[1] : driverCoord.lat,
-        lon: currentStep.maneuver?.location ? currentStep.maneuver.location[0] : driverCoord.lon,
-      })
+      lat: currentStep.maneuver?.location ? currentStep.maneuver.location[1] : driverCoord.lat,
+      lon: currentStep.maneuver?.location ? currentStep.maneuver.location[0] : driverCoord.lon,
+    })
     : (currentStep?.distanceMeters ?? 0);
 
-  const totalCoords = currentRoute?.coordinates?.length || 1;
-  const progressRatio = Math.min(1, simulatedCoordIndex / totalCoords);
-  const remainingDistanceKm = Math.max(0, (currentRoute?.totalDistanceKm || 0) * (1 - progressRatio));
-  const remainingDurationMinutes = Math.max(0, (currentRoute?.totalDurationMinutes || 0) * (1 - progressRatio));
+  const routeCumulativeKm = useMemo(() => {
+    const coords = currentRoute?.coordinates;
+    if (!coords || coords.length === 0) return [];
+    const cum: number[] = [0];
+    for (let i = 1; i < coords.length; i++) {
+      cum.push(cum[i - 1] + haversineDistanceMeters(coords[i - 1], coords[i]) / 1000);
+    }
+    return cum;
+  }, [currentRoute]);
+
+
+  const { remainingDistanceKm, remainingDurationMinutes } = useMemo(() => {
+    const coords = currentRoute?.coordinates;
+    if (!coords || coords.length === 0 || !driverCoord || routeCumulativeKm.length === 0) {
+      return {
+        remainingDistanceKm: currentRoute?.totalDistanceKm || 0,
+        remainingDurationMinutes: currentRoute?.totalDurationMinutes || 0,
+      };
+    }
+
+    let nearestIdx = 0;
+    let minDist = Infinity;
+    for (let i = 0; i < coords.length; i++) {
+      const d = haversineDistanceMeters(driverCoord, coords[i]);
+      if (d < minDist) { minDist = d; nearestIdx = i; }
+    }
+
+    const totalKm = currentRoute!.totalDistanceKm;
+    const traveledKm = routeCumulativeKm[nearestIdx];
+    const progressRatio = totalKm > 0 ? Math.min(1, traveledKm / totalKm) : 0;
+
+    return {
+      remainingDistanceKm: Math.max(0, totalKm - traveledKm),
+      remainingDurationMinutes: Math.max(0, currentRoute!.totalDurationMinutes * (1 - progressRatio)),
+    };
+  }, [currentRoute, driverCoord, routeCumulativeKm]);
 
   const upcomingHazard = driverCoord
     ? findUpcomingHazard(driverCoord, currentComparison?.alerts || [])
@@ -945,15 +1072,14 @@ export default function MapScreen() {
 
   const upcomingRoadHazard = driverCoord && currentRoadConditions
     ? currentRoadConditions.roadEvents.reduce<{ event: RoadEvent; distanceKm: number } | null>((closest, ev) => {
-        const d = haversineDistanceMeters(driverCoord, { lat: ev.lat, lon: ev.lon }) / 1000;
-        if (d <= 25 && (!closest || d < closest.distanceKm)) {
-          return { event: ev, distanceKm: d };
-        }
-        return closest;
-      }, null)
+      const d = haversineDistanceMeters(driverCoord, { lat: ev.lat, lon: ev.lon }) / 1000;
+      if (d <= 25 && (!closest || d < closest.distanceKm)) {
+        return { event: ev, distanceKm: d };
+      }
+      return closest;
+    }, null)
     : null;
 
-  // Spoken voice warning alert when approaching a weather hazard
   useEffect(() => {
     if (!isNavigating || !upcomingHazard || isMuted) return;
 
@@ -976,21 +1102,21 @@ export default function MapScreen() {
   const targetDestination = destination
     ? { latitude: destination.lat, longitude: destination.lon, label: destination.label }
     : activeNavRoute?.coordinates?.length
-    ? {
+      ? {
         latitude: activeNavRoute.coordinates[activeNavRoute.coordinates.length - 1].lat,
         longitude: activeNavRoute.coordinates[activeNavRoute.coordinates.length - 1].lon,
         label: 'Destination',
       }
-    : null;
+      : null;
 
   const currentDriverPos = isNavigating
     ? driverCoord
       ? { latitude: driverCoord.lat, longitude: driverCoord.lon }
       : activeNavRoute?.coordinates?.length
-      ? { latitude: activeNavRoute.coordinates[0].lat, longitude: activeNavRoute.coordinates[0].lon }
-      : userLocation
-      ? { latitude: userLocation.coords.latitude, longitude: userLocation.coords.longitude }
-      : null
+        ? { latitude: activeNavRoute.coordinates[0].lat, longitude: activeNavRoute.coordinates[0].lon }
+        : userLocation
+          ? { latitude: userLocation.coords.latitude, longitude: userLocation.coords.longitude }
+          : null
     : null;
 
   return (
@@ -1015,29 +1141,27 @@ export default function MapScreen() {
           }
         }}
         onLongPress={async (e) => {
-          if (!isNavigating) {
-            const { latitude, longitude } = e.nativeEvent.coordinate;
-            const fallbackLabel = `Location (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`;
-            setContextPinCoords({ lat: latitude, lon: longitude, label: fallbackLabel });
+          const { latitude, longitude } = e.nativeEvent.coordinate;
+          const fallbackLabel = `Location (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`;
+          setContextPinCoords({ lat: latitude, lon: longitude, label: fallbackLabel });
 
+          try {
+            let response: Response;
             try {
-              let response: Response;
-              try {
-                response = await fetch(`${NOMINATIM_BASE}/reverse?lat=${latitude}&lon=${longitude}&format=json`);
-                if (!response.ok) throw new Error('Proxy reverse failed');
-              } catch {
-                response = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`, {
-                  headers: { 'User-Agent': 'WeatherWiseApp/1.0' },
-                });
-              }
-              const data = await response.json();
-              if (data && data.display_name) {
-                const segments = data.display_name.split(',').map((s: string) => s.trim());
-                const clean = segments.length > 2 ? `${segments[0]}, ${segments[1]}` : data.display_name;
-                setContextPinCoords({ lat: latitude, lon: longitude, label: clean });
-              }
-            } catch {}
-          }
+              response = await fetch(`${NOMINATIM_BASE}/reverse?lat=${latitude}&lon=${longitude}&format=json`);
+              if (!response.ok) throw new Error('Proxy reverse failed');
+            } catch {
+              response = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`, {
+                headers: { 'User-Agent': 'WeatherWiseApp/1.0' },
+              });
+            }
+            const data = await response.json();
+            if (data && data.display_name) {
+              const segments = data.display_name.split(',').map((s: string) => s.trim());
+              const clean = segments.length > 2 ? `${segments[0]}, ${segments[1]}` : data.display_name;
+              setContextPinCoords({ lat: latitude, lon: longitude, label: clean });
+            }
+          } catch { }
         }}
       >
         <UrlTile
@@ -1058,51 +1182,62 @@ export default function MapScreen() {
             zIndex={250}
           />
         )}
-        {allRoutes.map((route, index) => {
-          const isSelected = selectedRouteIndex === index;
-          const comparison = comparisons.find(c => c.routeIndex === index);
-          
-          if (!isSelected) {
-            // Unselected alternative lines are hidden during navigation
-            if (isNavigating) return null;
-            return (
-              <Polyline
-                key={`calc-${routeCalculationId}-route-${index}`}
-                coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
-                strokeWidth={4}
-                strokeColor="rgba(100, 116, 139, 0.4)"
-                lineDashPattern={[5, 5]}
-                zIndex={5 + index}
-                tappable={true}
-                onPress={() => selectRoute(index)}
-              />
-            );
-          }
+        {allRoutes && allRoutes.length > 0 ? (
+          <React.Fragment key={`routes-overlay-${routeCalculationId}-${allRoutes.length}`}>
+            {allRoutes.map((route, index) => {
+              const isSelected = selectedRouteIndex === index;
+              const comparison = comparisons.find(c => c.routeIndex === index);
 
-          // Selected route: Segmented by TRAFFIC CONGESTION & ROAD HAZARDS (Floods, Congestion, Smooth Flow)
-          if (!currentRoadConditions || currentRoadConditions.segments.length === 0) {
-            return (
-              <Polyline
-                key={`calc-${routeCalculationId}-route-selected-${index}`}
-                coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
-                strokeWidth={6}
-                strokeColor={TRAFFIC_COLORS.free}
-                zIndex={10}
-              />
-            );
-          }
+              if (!isSelected) {
+                // Unselected alternative lines are hidden during navigation
+                if (isNavigating) return null;
+                return (
+                  <Polyline
+                    key={`calc-${routeCalculationId}-route-${index}`}
+                    coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
+                    strokeWidth={4}
+                    strokeColor="rgba(100, 116, 139, 0.4)"
+                    lineDashPattern={[5, 5]}
+                    zIndex={5 + index}
+                    tappable={true}
+                    onPress={() => selectRoute(index)}
+                  />
+                );
+              }
 
-          return currentRoadConditions.segments.map((seg) => (
-            <Polyline
-              key={`calc-${routeCalculationId}-traffic-seg-${seg.id}`}
-              coordinates={seg.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
-              strokeWidth={seg.condition === 'flooded' ? 8 : 6}
-              strokeColor={seg.color}
-              zIndex={seg.condition === 'flooded' ? 15 : 10}
-            />
-          ));
-        })}
-        
+              // Selected route: Segmented by TRAFFIC CONGESTION & ROAD HAZARDS (Floods, Congestion, Smooth Flow)
+              if (!currentRoadConditions || currentRoadConditions.segments.length === 0) {
+                return (
+                  <Polyline
+                    key={`calc-${routeCalculationId}-route-selected-${index}`}
+                    coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
+                    strokeWidth={6}
+                    strokeColor={TRAFFIC_COLORS.free}
+                    zIndex={10}
+                  />
+                );
+              }
+
+              return currentRoadConditions.segments.map((seg) => (
+                <Polyline
+                  key={`calc-${routeCalculationId}-traffic-seg-${seg.id}`}
+                  coordinates={seg.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
+                  strokeWidth={seg.condition === 'flooded' ? 8 : 6}
+                  strokeColor={seg.color}
+                  zIndex={seg.condition === 'flooded' ? 15 : 10}
+                />
+              ));
+            })}
+          </React.Fragment>
+        ) : (
+          <Polyline
+            key={`empty-polyline-${routeCalculationId}`}
+            coordinates={[]}
+            strokeWidth={0}
+            strokeColor="transparent"
+          />
+        )}
+
         {/* Weather Markers along route (sun, rain, cloud icons) */}
         {currentComparison?.alerts?.map((alert, index) => {
           const emoji = getWeatherEmoji(alert.weatherCode);
@@ -1151,8 +1286,7 @@ export default function MapScreen() {
               <View style={styles.originMarkerBadge}>
                 <MaterialCommunityIcons name="map-marker-radius" size={18} color={COLORS.white} />
               </View>
-              <View style={styles.originMarkerStem} />
-              <View style={styles.originMarkerDot} />
+              <View style={styles.originMarkerPointer} />
             </View>
           </Marker>
         )}
@@ -1175,8 +1309,7 @@ export default function MapScreen() {
               <View style={styles.destinationMarkerBadge}>
                 <MaterialCommunityIcons name="flag-checkered" size={22} color={COLORS.white} />
               </View>
-              <View style={styles.destinationMarkerStem} />
-              <View style={styles.destinationMarkerDot} />
+              <View style={styles.destinationMarkerPointer} />
             </View>
           </Marker>
         )}
@@ -1244,7 +1377,7 @@ export default function MapScreen() {
       )}
 
       {/* Interactive Context Pin Card (Long-Press anywhere on Map) */}
-      {contextPinCoords && !isNavigating && (
+      {contextPinCoords && (
         <View style={styles.contextPinCardContainer}>
           <BlurView intensity={95} tint="dark" style={styles.contextPinCard}>
             <View style={styles.contextPinHeader}>
@@ -1263,44 +1396,80 @@ export default function MapScreen() {
                 <MaterialCommunityIcons name="close" size={18} color={COLORS.textMuted} />
               </TouchableOpacity>
             </View>
-            <View style={styles.contextPinActionsRow}>
-              <TouchableOpacity
-                style={styles.contextPinOriginBtn}
-                onPress={() => {
-                  routeGenerationRef.current += 1;
-                  setRouteCalculationId((prev) => prev + 1);
-                  setAllRoutes([]);
-                  clearStoreState();
-                  setOrigin({ lat: contextPinCoords.lat, lon: contextPinCoords.lon, label: contextPinCoords.label });
-                  setContextPinCoords(null);
-                }}
-                accessible={true}
-                accessibilityRole="button"
-                accessibilityLabel="Set as starting location"
-                activeOpacity={0.8}
-              >
-                <MaterialCommunityIcons name="map-marker-radius" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
-                <Text style={styles.contextPinOriginBtnText}>Set as Start</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.contextPinDestBtn}
-                onPress={() => {
-                  routeGenerationRef.current += 1;
-                  setRouteCalculationId((prev) => prev + 1);
-                  setAllRoutes([]);
-                  clearStoreState();
-                  setDestination({ lat: contextPinCoords.lat, lon: contextPinCoords.lon, label: contextPinCoords.label });
-                  setContextPinCoords(null);
-                }}
-                accessible={true}
-                accessibilityRole="button"
-                accessibilityLabel="Set as destination"
-                activeOpacity={0.8}
-              >
-                <MaterialCommunityIcons name="flag-checkered" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
-                <Text style={styles.contextPinDestBtnText}>Set as Destination</Text>
-              </TouchableOpacity>
-            </View>
+
+            {isNavigating ? (
+              <View style={styles.contextPinActionsRow}>
+                <TouchableOpacity
+                  style={styles.contextPinOriginBtn}
+                  onPress={() => {
+                    const pt = contextPinCoords;
+                    setContextPinCoords(null);
+                    handleInDriveReroute(pt);
+                  }}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel="Reroute mid-drive to this point"
+                  activeOpacity={0.8}
+                >
+                  <MaterialCommunityIcons name="navigation" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
+                  <Text style={styles.contextPinOriginBtnText}>Reroute Mid-Drive</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.contextPinDestBtn}
+                  onPress={() => {
+                    const pt = contextPinCoords;
+                    setContextPinCoords(null);
+                    handleExitAndPlanNewRoute(pt);
+                  }}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel="Exit and plan route to this point"
+                  activeOpacity={0.8}
+                >
+                  <MaterialCommunityIcons name="routes" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
+                  <Text style={styles.contextPinDestBtnText}>Exit & Compare</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.contextPinActionsRow}>
+                <TouchableOpacity
+                  style={styles.contextPinOriginBtn}
+                  onPress={() => {
+                    routeGenerationRef.current += 1;
+                    setRouteCalculationId((prev) => prev + 1);
+                    setAllRoutes([]);
+                    clearStoreState();
+                    setOrigin({ lat: contextPinCoords.lat, lon: contextPinCoords.lon, label: contextPinCoords.label });
+                    setContextPinCoords(null);
+                  }}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel="Set as starting location"
+                  activeOpacity={0.8}
+                >
+                  <MaterialCommunityIcons name="map-marker-radius" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
+                  <Text style={styles.contextPinOriginBtnText}>Set as Start</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.contextPinDestBtn}
+                  onPress={() => {
+                    routeGenerationRef.current += 1;
+                    setRouteCalculationId((prev) => prev + 1);
+                    setAllRoutes([]);
+                    clearStoreState();
+                    setDestination({ lat: contextPinCoords.lat, lon: contextPinCoords.lon, label: contextPinCoords.label });
+                    setContextPinCoords(null);
+                  }}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel="Set as destination"
+                  activeOpacity={0.8}
+                >
+                  <MaterialCommunityIcons name="flag-checkered" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
+                  <Text style={styles.contextPinDestBtnText}>Set as Destination</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </BlurView>
         </View>
       )}
@@ -1379,6 +1548,17 @@ export default function MapScreen() {
               <View style={styles.inputContainer}>
                 {allRoutes.length > 0 && (
                   <View style={styles.collapseHeaderRow}>
+                    <TouchableOpacity
+                      style={styles.clearRouteSearchBtn}
+                      onPress={clearRouteState}
+                      accessible={true}
+                      accessibilityRole="button"
+                      accessibilityLabel="Clear current route"
+                    >
+                      <MaterialCommunityIcons name="close-circle-outline" size={16} color={COLORS.red} style={{ marginRight: 4 }} />
+                      <Text style={styles.clearRouteSearchText}>Clear Route</Text>
+                    </TouchableOpacity>
+
                     <TouchableOpacity
                       style={styles.collapseSearchBtn}
                       onPress={() => setIsSearchExpanded(false)}
@@ -1475,7 +1655,7 @@ export default function MapScreen() {
               </View>
             </BlurView>
           )}
-          
+
           {/* Inline Route Error Banner (R-27 UI States) */}
           {routeError && (
             <View style={styles.errorBanner} accessible={true} accessibilityRole="alert">
@@ -1494,7 +1674,7 @@ export default function MapScreen() {
 
           {/* Dynamic Weather Summary Banner (R-25 Contrast, R-04 Vector Icon, R-26 Non-redundant CTA) */}
           {summary && !routeError && (
-            <View 
+            <View
               style={[
                 styles.summaryBanner,
                 { backgroundColor: summary.overallRisk === 'high' ? COLORS.red : summary.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green }
@@ -1508,8 +1688,8 @@ export default function MapScreen() {
                   summary.overallRisk === 'high'
                     ? 'weather-lightning-rainy'
                     : summary.overallRisk === 'moderate'
-                    ? 'weather-partly-rainy'
-                    : 'shield-check'
+                      ? 'weather-partly-rainy'
+                      : 'shield-check'
                 }
                 size={20}
                 color={summary.overallRisk === 'high' ? COLORS.white : COLORS.navy}
@@ -1621,7 +1801,7 @@ export default function MapScreen() {
                       {comparisons.length > 1 ? 'Choose Route' : 'Route Overview'}
                     </Text>
                     <Text style={styles.sheetSubtitle}>
-                      {comparisons.length > 1 
+                      {comparisons.length > 1
                         ? 'Select route to preview hazard breakdown'
                         : 'Hazard-checked driving trajectory'}
                     </Text>
@@ -1646,11 +1826,11 @@ export default function MapScreen() {
                       style={[styles.headerControlBtn, { marginLeft: 8 }]}
                       onPress={() => {
                         LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                        setIsSheetDismissed(true);
+                        clearRouteState();
                       }}
                       accessible={true}
                       accessibilityRole="button"
-                      accessibilityLabel="Dismiss sheet to view full map"
+                      accessibilityLabel="Clear route and close"
                       hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     >
                       <MaterialCommunityIcons name="close" size={18} color={COLORS.textSecondary} />
@@ -1660,7 +1840,7 @@ export default function MapScreen() {
 
                 {/* Adaptive Content: Single Route Card vs Multi-route Horizontal Scroll */}
                 {comparisons.length === 1 ? (
-                  <View 
+                  <View
                     style={styles.singleRouteCard}
                     accessible={true}
                     accessibilityRole="summary"
@@ -1674,10 +1854,10 @@ export default function MapScreen() {
                         </Text>
                       </View>
                       <View style={[styles.riskBadgeLarge, { backgroundColor: currentRiskColor + '20', borderColor: currentRiskColor }]}>
-                        <MaterialCommunityIcons 
-                          name={comparisons[0].overallRisk === 'high' ? 'weather-lightning-rainy' : comparisons[0].overallRisk === 'moderate' ? 'weather-partly-rainy' : 'shield-check'} 
-                          size={18} 
-                          color={currentRiskColor} 
+                        <MaterialCommunityIcons
+                          name={comparisons[0].overallRisk === 'high' ? 'weather-lightning-rainy' : comparisons[0].overallRisk === 'moderate' ? 'weather-partly-rainy' : 'shield-check'}
+                          size={18}
+                          color={currentRiskColor}
                         />
                         <Text style={[styles.riskTextLarge, { color: currentRiskColor }]}>
                           {comparisons[0].overallRisk.toUpperCase()} RISK
@@ -1704,21 +1884,21 @@ export default function MapScreen() {
                     </View>
                   </View>
                 ) : (
-                  <ScrollView 
-                    horizontal 
-                    showsHorizontalScrollIndicator={false} 
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
                     contentContainerStyle={styles.comparisonScroll}
                     keyboardShouldPersistTaps="handled"
                   >
                     {(comparisons ?? []).map((comp) => {
                       const isSelected = selectedRouteIndex === comp.routeIndex;
                       const isRecommended = comp.overallRisk === 'clear' && comp.extraMinutesVsPrimary >= 0;
-                      const riskColor = comp.overallRisk === 'high' ? COLORS.red : 
-                                       comp.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green;
-                      
+                      const riskColor = comp.overallRisk === 'high' ? COLORS.red :
+                        comp.overallRisk === 'moderate' ? COLORS.yellow : COLORS.green;
+
                       return (
-                        <TouchableOpacity 
-                          key={comp.routeIndex} 
+                        <TouchableOpacity
+                          key={comp.routeIndex}
                           onPress={() => selectRoute(comp.routeIndex)}
                           activeOpacity={0.7}
                           accessible={true}
@@ -1737,10 +1917,10 @@ export default function MapScreen() {
                               <Text style={[styles.riskText, { color: riskColor }]}>{comp.overallRisk.toUpperCase()}</Text>
                             </View>
                           </View>
-                          
+
                           <Text style={styles.durationText}>{Math.round(comp.totalDurationMinutes)} min</Text>
                           <Text style={styles.distanceText}>{comp.totalDistanceKm.toFixed(1)} km</Text>
-                          
+
                           {comp.extraMinutesVsPrimary > 0 ? (
                             <Text style={styles.extraText}>
                               +{Math.round(comp.extraMinutesVsPrimary)} min vs primary
@@ -1788,27 +1968,41 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* STATE 3: DISMISSED (Floating Route Pill to easily restore bottom sheet) */}
+      {/* STATE 3: DISMISSED (Floating Route Pill to easily restore bottom sheet or clear route) */}
       {!isNavigating && comparisons?.length > 0 && isSheetDismissed && (
-        <TouchableOpacity
-          style={styles.floatingRoutePill}
-          onPress={() => {
-            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-            setIsSheetDismissed(false);
-            setIsSheetCollapsed(false);
-          }}
-          activeOpacity={0.85}
-          accessible={true}
-          accessibilityRole="button"
-          accessibilityLabel="Restore route comparison sheet"
-        >
-          <MaterialCommunityIcons name="map-marker-path" size={18} color={COLORS.electricBlue} />
-          <Text style={styles.floatingRoutePillText}>
-            {Math.round(currentComparison?.totalDurationMinutes ?? 0)} min
-          </Text>
-          <View style={[styles.riskDot, { backgroundColor: currentRiskColor }]} />
-          <MaterialCommunityIcons name="chevron-up" size={18} color={COLORS.textSecondary} />
-        </TouchableOpacity>
+        <View style={styles.floatingRoutePillWrapper}>
+          <TouchableOpacity
+            style={styles.floatingRoutePill}
+            onPress={() => {
+              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+              setIsSheetDismissed(false);
+              setIsSheetCollapsed(false);
+            }}
+            activeOpacity={0.85}
+            accessible={true}
+            accessibilityRole="button"
+            accessibilityLabel="Restore route comparison sheet"
+          >
+            <MaterialCommunityIcons name="map-marker-path" size={18} color={COLORS.electricBlue} />
+            <Text style={styles.floatingRoutePillText}>
+              {Math.round(currentComparison?.totalDurationMinutes ?? 0)} min
+            </Text>
+            <View style={[styles.riskDot, { backgroundColor: currentRiskColor }]} />
+            <MaterialCommunityIcons name="chevron-up" size={18} color={COLORS.textSecondary} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.floatingRouteClearBtn}
+            onPress={clearRouteState}
+            activeOpacity={0.85}
+            accessible={true}
+            accessibilityRole="button"
+            accessibilityLabel="Clear active route"
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <MaterialCommunityIcons name="close" size={16} color={COLORS.white} />
+          </TouchableOpacity>
+        </View>
       )}
 
       {/* ACTIVE NAVIGATION HUD */}
@@ -1822,6 +2016,8 @@ export default function MapScreen() {
           currentSpeedKph={currentSpeedKph}
           upcomingHazard={upcomingHazard}
           upcomingRoadHazard={upcomingRoadHazard}
+          saferAlternative={saferAlternative}
+          onAcceptSaferRoute={handleAcceptSaferRoute}
           isSimulating={isSimulating}
           simulationSpeed={simulationSpeed}
           isMuted={isMuted}
@@ -1830,7 +2026,8 @@ export default function MapScreen() {
           onChangeSimSpeed={(spd) => setSimulationSpeed(spd)}
           onToggleMute={() => setIsMuted(!isMuted)}
           onRecenter={handleRecenterCamera}
-          onExitNavigation={handleExitNavigation}
+          onExitNavigation={() => handleExitNavigation(true)}
+          onRouteOverview={handleRouteOverview}
           onChangeDestination={() => setIsRerouteModalVisible(true)}
         />
       )}
@@ -1851,7 +2048,7 @@ export default function MapScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.rerouteModalTitle}>Change Destination</Text>
                 <Text style={styles.rerouteModalSubtitle}>
-                  Current location will be set as starting point
+                  Select how you would like to proceed with the new destination
                 </Text>
               </View>
               <TouchableOpacity
@@ -1870,11 +2067,83 @@ export default function MapScreen() {
               placeholder="Search new destination..."
               value=""
               onSelect={(lat, lon, label) => {
-                handleInDriveReroute({ lat, lon, label });
+                Alert.alert(
+                  'Update Destination',
+                  `Destination selected: ${label.split(',')[0]}`,
+                  [
+                    {
+                      text: 'Reroute Now (Keep Driving)',
+                      onPress: () => handleInDriveReroute({ lat, lon, label }),
+                    },
+                    {
+                      text: 'Exit & Compare Routes',
+                      onPress: () => {
+                        setIsRerouteModalVisible(false);
+                        handleExitAndPlanNewRoute({ lat, lon, label });
+                      },
+                    },
+                    { text: 'Cancel', style: 'cancel' },
+                  ]
+                );
               }}
             />
+
+            <TouchableOpacity
+              style={styles.exitAndCompareShortcutBtn}
+              onPress={() => {
+                setIsRerouteModalVisible(false);
+                handleExitAndPlanNewRoute();
+              }}
+              activeOpacity={0.8}
+              accessible={true}
+              accessibilityRole="button"
+              accessibilityLabel="Exit active navigation to browse map and compare routes"
+            >
+              <MaterialCommunityIcons name="map-search" size={18} color={COLORS.electricBlue} style={{ marginRight: 8 }} />
+              <Text style={styles.exitAndCompareShortcutText}>Exit navigation and browse map / compare routes</Text>
+            </TouchableOpacity>
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* DESTINATION ARRIVAL MODAL */}
+      <Modal
+        visible={isArrived}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {
+          setIsArrived(false);
+          handleExitNavigation();
+        }}
+      >
+        <View style={styles.arrivalModalOverlay}>
+          <BlurView intensity={95} tint="dark" style={styles.arrivalCard}>
+            <View style={styles.arrivalIconWrapper}>
+              <MaterialCommunityIcons name="flag-checkered" size={38} color={COLORS.green} />
+            </View>
+            <Text style={styles.arrivalTitle}>You Have Arrived!</Text>
+            <Text style={styles.arrivalSubtitle} numberOfLines={2}>
+              {destination?.label || 'Destination reached successfully'}
+            </Text>
+
+            <View style={styles.arrivalDivider} />
+
+            <TouchableOpacity
+              style={styles.arrivalFinishBtn}
+              onPress={() => {
+                setIsArrived(false);
+                handleExitNavigation(true);
+              }}
+              activeOpacity={0.85}
+              accessible={true}
+              accessibilityRole="button"
+              accessibilityLabel="Finish and exit navigation session"
+            >
+              <MaterialCommunityIcons name="check" size={20} color={COLORS.white} style={{ marginRight: 8 }} />
+              <Text style={styles.arrivalFinishBtnText}>Finish Trip</Text>
+            </TouchableOpacity>
+          </BlurView>
+        </View>
       </Modal>
     </View>
   );
@@ -1908,8 +2177,24 @@ const styles = StyleSheet.create({
   buttonText: { color: COLORS.white, fontSize: 16, fontWeight: '700' },
   collapseHeaderRow: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     marginBottom: 6,
+  },
+  clearRouteSearchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: RADII.sm,
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+  },
+  clearRouteSearchText: {
+    color: COLORS.red,
+    fontSize: 12,
+    fontWeight: '700',
   },
   collapseSearchBtn: {
     flexDirection: 'row',
@@ -2142,10 +2427,16 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   // --- Dismissed Mode: Floating Route Pill ---
-  floatingRoutePill: {
+  floatingRoutePillWrapper: {
     position: 'absolute',
     bottom: 20,
     alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    zIndex: 90,
+  },
+  floatingRoutePill: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(15, 23, 42, 0.94)',
@@ -2160,7 +2451,21 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.35,
     shadowRadius: 8,
     elevation: 6,
-    zIndex: 90,
+  },
+  floatingRouteClearBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(239, 68, 68, 0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 6,
   },
   floatingRoutePillText: {
     color: COLORS.white,
@@ -2293,7 +2598,6 @@ const styles = StyleSheet.create({
   },
   // Destination and Origin Pin Marker Styles
   destinationMarkerContainer: {
-    width: 90,
     alignItems: 'center',
     justifyContent: 'flex-start',
   },
@@ -2332,18 +2636,19 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 6,
   },
-  destinationMarkerStem: {
-    width: 3,
-    height: 8,
-    backgroundColor: '#EF4444',
-    marginTop: -1,
-  },
-  destinationMarkerDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: 'rgba(0, 0, 0, 0.45)',
-    marginTop: 1,
+  destinationMarkerPointer: {
+    width: 0,
+    height: 0,
+    backgroundColor: 'transparent',
+    borderStyle: 'solid',
+    borderLeftWidth: 6,
+    borderRightWidth: 6,
+    borderTopWidth: 8,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderTopColor: '#EF4444',
+    alignSelf: 'center',
+    marginTop: -2,
   },
   markingBanner: {
     position: 'absolute',
@@ -2382,8 +2687,6 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
   originMarkerContainer: {
-    width: 44,
-    height: 52,
     alignItems: 'center',
     justifyContent: 'flex-start',
   },
@@ -2402,18 +2705,19 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
     elevation: 5,
   },
-  originMarkerStem: {
-    width: 3,
-    height: 7,
-    backgroundColor: COLORS.electricBlue,
-    marginTop: -1,
-  },
-  originMarkerDot: {
-    width: 5,
-    height: 5,
-    borderRadius: 2.5,
-    backgroundColor: 'rgba(0, 0, 0, 0.45)',
-    marginTop: 1,
+  originMarkerPointer: {
+    width: 0,
+    height: 0,
+    backgroundColor: 'transparent',
+    borderStyle: 'solid',
+    borderLeftWidth: 6,
+    borderRightWidth: 6,
+    borderTopWidth: 8,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderTopColor: COLORS.electricBlue,
+    alignSelf: 'center',
+    marginTop: -2,
   },
   // --- Swap Endpoints Button Styles ---
   swapEndpointsRow: {
@@ -2559,5 +2863,89 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  exitAndCompareShortcutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginTop: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.3)',
+  },
+  exitAndCompareShortcutText: {
+    color: COLORS.electricBlue,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  arrivalModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  arrivalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    borderRadius: 24,
+    padding: 24,
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    elevation: 12,
+  },
+  arrivalIconWrapper: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+    borderWidth: 2,
+    borderColor: COLORS.green,
+  },
+  arrivalTitle: {
+    color: COLORS.white,
+    fontSize: 22,
+    fontWeight: '900',
+    letterSpacing: -0.5,
+    textAlign: 'center',
+  },
+  arrivalSubtitle: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  arrivalDivider: {
+    height: 1,
+    width: '100%',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    marginVertical: 20,
+  },
+  arrivalFinishBtn: {
+    width: '100%',
+    backgroundColor: COLORS.green,
+    borderRadius: 14,
+    minHeight: 48,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  arrivalFinishBtnText: {
+    color: COLORS.navy,
+    fontSize: 16,
+    fontWeight: '800',
   },
 });

@@ -57,6 +57,7 @@ export const useWeatherAlerts = () => {
   const summary = useWeatherStore((s) => s.summary);
   const isAnalyzing = useWeatherStore((s) => s.isAnalyzing);
   const comparisons = useWeatherStore((s) => s.comparisons);
+  const selectedRouteIndex = useWeatherStore((s) => s.selectedRouteIndex);
 
   const setAlerts = useWeatherStore((s) => s.setAlerts);
   const setSummary = useWeatherStore((s) => s.setSummary);
@@ -119,13 +120,14 @@ export const useWeatherAlerts = () => {
   /**
    * Compares multiple routes and ranks them by risk.
    */
-  const compareRoutes = async (routes: RouteResponse[]): Promise<RouteComparison[]> => {
+  const compareRoutes = async (
+    routes: RouteResponse[],
+    options?: { autoSelectBest?: boolean }
+  ): Promise<RouteComparison[]> => {
+    const autoSelectBest = options?.autoSelectBest ?? true;
     if (routes.length === 0) return [];
-    
+
     setIsAnalyzing(true);
-    setComparisons([]);
-    setAlerts([]);
-    setSummary(null);
     const departureTime = new Date();
 
     try {
@@ -158,21 +160,25 @@ export const useWeatherAlerts = () => {
 
       // Update store
       setComparisons(sortedComparisons);
-      
-      // Automatically set the safest/best route as active
-      const best = sortedComparisons[0];
-      setAlerts(best.alerts);
+
+      const activeIndex = autoSelectBest ? sortedComparisons[0].routeIndex : selectedRouteIndex;
+      const active = sortedComparisons.find((c) => c.routeIndex === activeIndex) ?? sortedComparisons[0];
+
+      setAlerts(active.alerts);
       setSummary({
-        totalWaypoints: best.totalWaypoints,
-        clearWaypoints: best.clearWaypoints,
-        moderateWaypoints: best.moderateWaypoints,
-        hazardousWaypoints: best.hazardousWaypoints,
-        firstHazardMinutes: best.firstHazardMinutes,
-        firstHazardLabel: best.firstHazardLabel,
-        overallRisk: best.overallRisk,
-        analysisTimeMs: best.analysisTimeMs,
+        totalWaypoints: active.totalWaypoints,
+        clearWaypoints: active.clearWaypoints,
+        moderateWaypoints: active.moderateWaypoints,
+        hazardousWaypoints: active.hazardousWaypoints,
+        firstHazardMinutes: active.firstHazardMinutes,
+        firstHazardLabel: active.firstHazardLabel,
+        overallRisk: active.overallRisk,
+        analysisTimeMs: active.analysisTimeMs,
       });
-      setSelectedRouteIndex(best.routeIndex);
+
+      if (autoSelectBest) {
+        setSelectedRouteIndex(active.routeIndex);
+      }
 
       return sortedComparisons;
 
