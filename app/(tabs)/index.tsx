@@ -232,6 +232,12 @@ export default function MapScreen() {
     }
   };
 
+  const nudgeMapRepaint = () => {
+    if (typeof (mapRef.current as any)?.animateCamera === 'function') {
+      (mapRef.current as any).animateCamera({}, { duration: 1 });
+    }
+  };
+
   // Wipes routes, comparisons, and map overlays. No navigation logic here,
   // and it never calls handleExitNavigation — this is the one place state actually gets cleared.
   const resetRouteAndMapState = () => {
@@ -239,6 +245,7 @@ export default function MapScreen() {
     clearStoreState();
     setLoadingState('');
     setRouteGeneration((g) => g + 1);
+    nudgeMapRepaint();
   };
 
   const handleExitNavigation = (shouldClearSession?: boolean | any) => {
@@ -260,6 +267,14 @@ export default function MapScreen() {
     setSimulatedCoordIndex(0);
 
     resetRouteAndMapState(); // <-- calls the shared helper, not clearRouteState
+
+    // Clear endpoints and reset search UI so the app is fully fresh
+    setOrigin(null);
+    setDestination(null);
+    setIsSearchExpanded(true);
+    setIsSheetCollapsed(false);
+    setIsSheetDismissed(false);
+    lastCalculatedEndpointsRef.current = '';
 
     if (typeof (mapRef.current as any)?.animateCamera === 'function') {
       (mapRef.current as any).animateCamera({ pitch: 0, heading: 0 });
