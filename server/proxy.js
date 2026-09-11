@@ -57,7 +57,7 @@ app.use('/osrm', async (req, res) => {
     const response = await axios({
       method: req.method,
       url: targetUrl,
-      timeout: 10000,
+      timeout: 3000,
       headers: {
         'User-Agent': 'WeatherWiseApp/1.0',
         'Accept': 'application/json',
@@ -66,6 +66,24 @@ app.use('/osrm', async (req, res) => {
     return res.status(response.status).json(response.data);
   } catch (err) {
     console.warn('[OSRM Proxy Primary Error]', err.message);
+
+    // Fast fallback: try the high-speed OSM routing server
+    try {
+      const fastOsmUrl = `https://routing.openstreetmap.de/routed-car${targetPath.replace('&alternatives=true', '').replace('alternatives=true&', '').replace('?alternatives=true', '?')}`;
+      console.log(`[OSRM Proxy] Trying fast OSM routing server → ${fastOsmUrl}`);
+      const fastRes = await axios({
+        method: req.method,
+        url: fastOsmUrl,
+        timeout: 3500,
+        headers: {
+          'User-Agent': 'WeatherWiseApp/1.0',
+          'Accept': 'application/json',
+        },
+      });
+      return res.status(fastRes.status).json(fastRes.data);
+    } catch (osmErr) {
+      console.warn('[OSRM Proxy Fast OSM Error]', osmErr.message);
+    }
 
     // If alternatives=true timed out or failed, immediately retry with alternatives=false
     // The public OSRM demo server frequently throttles complex multi-route queries, but primary routes return in < 1s!
@@ -76,7 +94,7 @@ app.use('/osrm', async (req, res) => {
         const fallbackRes = await axios({
           method: req.method,
           url: fallbackUrl,
-          timeout: 10000,
+          timeout: 3000,
           headers: {
             'User-Agent': 'WeatherWiseApp/1.0',
             'Accept': 'application/json',
