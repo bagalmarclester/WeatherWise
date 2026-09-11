@@ -1147,7 +1147,7 @@ export default function MapScreen() {
         initialRegion={DEFAULT_REGION}
         showsUserLocation={!isNavigating}
         showsMyLocationButton={!isNavigating}
-        mapType="none"
+        mapType="standard"
         customMapStyle={mapStyle}
         pitchEnabled={false}
         onMapReady={() => {
