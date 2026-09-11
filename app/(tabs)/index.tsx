@@ -5,7 +5,7 @@ import * as Location from 'expo-location';
 import { useFocusEffect } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, BackHandler, KeyboardAvoidingView, LayoutAnimation, Modal, Platform, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE, UrlTile } from 'react-native-maps';
+import MapView, { Marker, Polyline, UrlTile } from 'react-native-maps';
 import { Divider, Text } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LocationSearchInput } from '../../components/LocationSearchInput';
@@ -1143,13 +1143,11 @@ export default function MapScreen() {
       <MapView
         key={`map-${mapResetKey}`}
         ref={mapRef}
-        provider={PROVIDER_GOOGLE}
         style={styles.map}
         initialRegion={DEFAULT_REGION}
         showsUserLocation={!isNavigating}
         showsMyLocationButton={!isNavigating}
-        mapType={Platform.OS === 'android' ? 'none' : 'standard'}
-        customMapStyle={mapStyle}
+        mapType="none"
         pitchEnabled={false}
         onMapReady={() => {
           // After remount, restore camera to saved position so map doesn't jump to default
@@ -1194,11 +1192,10 @@ export default function MapScreen() {
       >
         {/* OpenStreetMap Tile Layer (Free, reliable, no Google billing needed) */}
         <UrlTile
-          urlTemplate="https://cartodb-basemaps-a.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png"
+          urlTemplate="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
           maximumZ={19}
           flipY={false}
           tileSize={256}
-          zIndex={-1}
         />
 
         {/* Context Pin for Map Long-Press Selection */}
