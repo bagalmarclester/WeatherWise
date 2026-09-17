@@ -25,11 +25,6 @@
       "predictiveBackGestureEnabled": false,
       "package": "com.anonymous.weatherwise",
       "usesCleartextTraffic": true,
-      "config": {
-        "googleMaps": {
-          "apiKey": "AIzaSyCo7em0OyWq9kwVO-dmlkbK32op0HMqPDU"
-        }
-      },
       "permissions": [
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
@@ -48,12 +43,7 @@
     },
     "plugins": [
       "expo-router",
-      [
-        "react-native-maps",
-        {
-          "androidGoogleMapsApiKey": "AIzaSyCo7em0OyWq9kwVO-dmlkbK32op0HMqPDU"
-        }
-      ],
+      "@maplibre/maplibre-react-native",
       [
         "expo-location",
         {

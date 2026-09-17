@@ -5,11 +5,11 @@ import * as Location from 'expo-location';
 import { useFocusEffect } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, BackHandler, KeyboardAvoidingView, LayoutAnimation, Modal, Platform, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Divider, Text } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LocationSearchInput } from '../../components/LocationSearchInput';
 import { NavigationHUD } from '../../components/NavigationHUD';
+import MapView, { MapViewRef, Marker, Polyline, UrlTile } from '../../components/OpenStreetMap';
 import { useWeatherAlerts } from '../../hooks/useWeatherAlerts';
 import {
   calculateBearing,
@@ -58,24 +58,6 @@ const RADII = {
 
 const NOMINATIM_BASE = `${getProxyBaseUrl()}/nominatim`;
 
-const mapStyle = [
-  { "elementType": "geometry", "stylers": [{ "color": "#242f3e" }] },
-  { "elementType": "labels.text.fill", "stylers": [{ "color": "#746855" }] },
-  { "elementType": "labels.text.stroke", "stylers": [{ "color": "#242f3e" }] },
-  { "featureType": "administrative.locality", "elementType": "labels.text.fill", "stylers": [{ "color": "#d59563" }] },
-  { "featureType": "poi", "elementType": "labels.text.fill", "stylers": [{ "color": "#d59563" }] },
-  { "featureType": "poi.park", "elementType": "geometry", "stylers": [{ "color": "#263c3f" }] },
-  { "featureType": "poi.park", "elementType": "labels.text.fill", "stylers": [{ "color": "#6b9a76" }] },
-  { "featureType": "road", "elementType": "geometry", "stylers": [{ "color": "#38414e" }] },
-  { "featureType": "road", "elementType": "geometry.stroke", "stylers": [{ "color": "#212a37" }] },
-  { "featureType": "road", "elementType": "labels.text.fill", "stylers": [{ "color": "#9ca5b3" }] },
-  { "featureType": "road.highway", "elementType": "geometry", "stylers": [{ "color": "#746855" }] },
-  { "featureType": "road.highway", "elementType": "geometry.stroke", "stylers": [{ "color": "#1f2835" }] },
-  { "featureType": "road.highway", "elementType": "labels.text.fill", "stylers": [{ "color": "#f3d19c" }] },
-  { "featureType": "water", "elementType": "geometry", "stylers": [{ "color": "#17263c" }] },
-  { "featureType": "water", "elementType": "labels.text.fill", "stylers": [{ "color": "#515c6d" }] },
-  { "featureType": "water", "elementType": "labels.text.stroke", "stylers": [{ "color": "#17263c" }] }
-];
 
 /**
  * Returns an emoji based on the WMO weather code.
@@ -134,6 +116,8 @@ export default function MapScreen() {
   );
 
   const [tracksViewChanges, setTracksViewChanges] = useState(true);
+  // Controls whether origin full input is visible in search mode (default: collapsed to quick-row)
+  const [showOriginInput, setShowOriginInput] = useState(false);
 
   useEffect(() => {
     setTracksViewChanges(true);
@@ -160,7 +144,7 @@ export default function MapScreen() {
   const clearStoreState = useWeatherStore((s) => s.clearRouteState);
   const setRouteLabels = useWeatherStore((s) => s.setRouteLabels);
   const { isAnalyzing, compareRoutes, selectRoute, summary } = useWeatherAlerts();
-  const mapRef = useRef<MapView>(null);
+  const mapRef = useRef<MapViewRef>(null);
 
   // Navigation Mode States
   const [isNavigating, setIsNavigating] = useState(false);
@@ -612,6 +596,8 @@ export default function MapScreen() {
         if (lastKnown) {
           setUserLocation(lastKnown);
           saveLocationToStorage(lastKnown.coords.latitude, lastKnown.coords.longitude);
+          // Auto-populate origin if not already set by the user
+          setOrigin((prev) => prev ?? { lat: lastKnown.coords.latitude, lon: lastKnown.coords.longitude, label: 'Current Location' });
           mapRef.current?.animateToRegion({
             latitude: lastKnown.coords.latitude,
             longitude: lastKnown.coords.longitude,
@@ -633,6 +619,13 @@ export default function MapScreen() {
         if (location) {
           setUserLocation(location);
           saveLocationToStorage(location.coords.latitude, location.coords.longitude);
+          // Silently refine origin to fresh GPS coords if it is still the auto-set GPS default
+          setOrigin((prev) => {
+            if (!prev || prev.label === 'Current Location') {
+              return { lat: location.coords.latitude, lon: location.coords.longitude, label: 'Current Location' };
+            }
+            return prev;
+          });
           mapRef.current?.animateToRegion({
             latitude: location.coords.latitude,
             longitude: location.coords.longitude,
@@ -965,7 +958,7 @@ export default function MapScreen() {
     return () => clearTimeout(timer);
   }, [origin?.lat, origin?.lon, destination?.lat, destination?.lon, isNavigating]);
 
-  // In-drive dynamic rerouting (Google Maps style)
+  // In-drive dynamic rerouting (OpenStreetMap navigation style)
   const handleInDriveReroute = async (newDest: { lat: number; lon: number; label: string }) => {
     setIsRerouteModalVisible(false);
     const startPoint = driverCoord || (userLocation ? { lat: userLocation.coords.latitude, lon: userLocation.coords.longitude } : origin);
@@ -1143,14 +1136,12 @@ export default function MapScreen() {
       <MapView
         key={`map-${mapResetKey}`}
         ref={mapRef}
-        provider={PROVIDER_GOOGLE}
         style={styles.map}
         initialRegion={DEFAULT_REGION}
         showsUserLocation={!isNavigating}
         showsMyLocationButton={!isNavigating}
-        mapType="standard"
-        customMapStyle={mapStyle}
-        pitchEnabled={true}
+        mapType="none"
+        pitchEnabled={false}
         onMapReady={() => {
           // After remount, restore camera to saved position so map doesn't jump to default
           if (savedCameraRegionRef.current) {
@@ -1192,6 +1183,13 @@ export default function MapScreen() {
           } catch { }
         }}
       >
+        {/* OpenStreetMap / CARTO Basemap Layer (100% Free, NO Access Blocked, NO Google Billing Needed) */}
+        <UrlTile
+          urlTemplate="https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+          maximumZ={19}
+          flipY={false}
+          tileSize={256}
+        />
         {/* Context Pin for Map Long-Press Selection */}
         {contextPinCoords && !isNavigating && (
           <Marker
@@ -1211,7 +1209,7 @@ export default function MapScreen() {
           if (route && !isSelectedSlot) {
             return (
               <Polyline
-                key={`slot-${slotIndex}`}
+                key={`slot-${routeGeneration}-${slotIndex}`}
                 coordinates={isVisible ? route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon })) : []}
                 strokeWidth={isVisible ? 4 : 0}
                 strokeColor={isVisible ? 'rgba(100, 116, 139, 0.4)' : 'transparent'}
@@ -1228,7 +1226,7 @@ export default function MapScreen() {
             if (!currentRoadConditions || currentRoadConditions.segments.length === 0) {
               return (
                 <Polyline
-                  key={`slot-${slotIndex}`}
+                  key={`slot-${routeGeneration}-${slotIndex}`}
                   coordinates={route.coordinates.map((p: any) => ({ latitude: p.lat, longitude: p.lon }))}
                   strokeWidth={6}
                   strokeColor={TRAFFIC_COLORS.free}
@@ -1240,10 +1238,10 @@ export default function MapScreen() {
             return null;
           }
 
-          // Empty slot — keeps the native overlay alive but invisible
+          // Empty slot — invisible placeholder; keyed by generation so it remounts on new search
           return (
             <Polyline
-              key={`slot-${slotIndex}`}
+              key={`slot-${routeGeneration}-${slotIndex}`}
               coordinates={[]}
               strokeWidth={0}
               strokeColor="transparent"
@@ -1526,9 +1524,11 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* INPUT SEARCH PANEL (Hidden during Navigation) */}
+      {/* SEARCH PANEL — 3 states: Explore (pill) → Search (form) → Route Preview (compact bar) */}
       {!isNavigating && (
         <View style={[styles.inputWrapper, { top: insets.top + 8 }]}>
+
+          {/* ── STATE 3: ROUTE PREVIEW — compact top bar when routes are ready ── */}
           {allRoutes.length > 0 && !isSearchExpanded ? (
             <BlurView intensity={90} tint="dark" style={styles.compactRouteBar}>
               <TouchableOpacity
@@ -1536,7 +1536,7 @@ export default function MapScreen() {
                 onPress={clearRouteState}
                 accessible={true}
                 accessibilityRole="button"
-                accessibilityLabel="Clear route search"
+                accessibilityLabel="Clear route and return to explore"
               >
                 <MaterialCommunityIcons name="arrow-left" size={20} color={COLORS.white} />
               </TouchableOpacity>
@@ -1547,7 +1547,7 @@ export default function MapScreen() {
                 activeOpacity={0.7}
                 accessible={true}
                 accessibilityRole="button"
-                accessibilityLabel="Edit search locations"
+                accessibilityLabel="Edit route endpoints"
               >
                 <View style={styles.compactEndpointsRow}>
                   <Text style={styles.compactOriginText} numberOfLines={1}>
@@ -1571,75 +1571,46 @@ export default function MapScreen() {
                 <MaterialCommunityIcons name="pencil-outline" size={18} color={COLORS.electricBlue} />
               </TouchableOpacity>
             </BlurView>
-          ) : (
+
+          ) : isSearchExpanded ? (
+            /* ── STATE 2: SEARCH / EDIT MODE — destination-first, origin secondary ── */
             <BlurView intensity={80} tint="dark" style={styles.blurContainer}>
               <View style={styles.inputContainer}>
-                {allRoutes.length > 0 && (
-                  <View style={styles.collapseHeaderRow}>
-                    <TouchableOpacity
-                      style={styles.clearRouteSearchBtn}
-                      onPress={clearRouteState}
-                      accessible={true}
-                      accessibilityRole="button"
-                      accessibilityLabel="Clear current route"
-                    >
-                      <MaterialCommunityIcons name="close-circle-outline" size={16} color={COLORS.red} style={{ marginRight: 4 }} />
-                      <Text style={styles.clearRouteSearchText}>Clear Route</Text>
-                    </TouchableOpacity>
 
-                    <TouchableOpacity
-                      style={styles.collapseSearchBtn}
-                      onPress={() => setIsSearchExpanded(false)}
-                      accessible={true}
-                      accessibilityRole="button"
-                      accessibilityLabel="Hide search panel and view map"
-                    >
-                      <Text style={styles.collapseSearchText}>View Map</Text>
-                      <MaterialCommunityIcons name="chevron-up" size={18} color={COLORS.electricBlue} />
-                    </TouchableOpacity>
-                  </View>
-                )}
-                <LocationSearchInput
-                  label="Origin"
-                  placeholder="Search start location or mark on map..."
-                  value={origin?.label || ''}
-                  onSelect={(lat, lon, label) => {
-                    setRouteGeneration((g) => g + 1);
-                    setAllRoutes([]);
-                    clearStoreState();
-                    setOrigin({ lat, lon, label });
-                  }}
-                  onClear={() => {
-                    setRouteGeneration((g) => g + 1);
-                    setAllRoutes([]);
-                    clearStoreState();
-                    setOrigin(null);
-                  }}
-                  showCurrentLocationButton={true}
-                  onCurrentLocationPress={handleUseCurrentLocation}
-                  showMarkOnMapButton={true}
-                  isMarkingOnMap={isMarkingOrigin}
-                  onMarkOnMapPress={() => {
-                    setIsMarkingDestination(false);
-                    setIsMarkingOrigin((prev) => !prev);
-                  }}
-                />
-                <View style={styles.swapEndpointsRow}>
-                  <Divider style={styles.swapDivider} />
+                {/* Header row with back button */}
+                <View style={styles.searchModeHeader}>
                   <TouchableOpacity
-                    style={styles.swapEndpointsBtn}
-                    onPress={handleSwapEndpoints}
+                    style={styles.backBtn}
+                    onPress={() => {
+                      setIsSearchExpanded(false);
+                      setShowOriginInput(false);
+                    }}
                     accessible={true}
                     accessibilityRole="button"
-                    accessibilityLabel="Swap start and destination locations"
-                    activeOpacity={0.7}
+                    accessibilityLabel="Close search"
                   >
-                    <MaterialCommunityIcons name="swap-vertical" size={20} color={COLORS.electricBlue} />
+                    <MaterialCommunityIcons name="arrow-left" size={20} color={COLORS.white} />
                   </TouchableOpacity>
+                  <Text style={styles.searchModeTitle}>
+                    {allRoutes.length > 0 ? 'Edit Route' : 'Plan Route'}
+                  </Text>
+                  {allRoutes.length > 0 && (
+                    <TouchableOpacity
+                      onPress={() => { clearRouteState(); setIsSearchExpanded(false); setShowOriginInput(false); }}
+                      accessible={true}
+                      accessibilityRole="button"
+                      accessibilityLabel="Clear route"
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <MaterialCommunityIcons name="close" size={18} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  )}
                 </View>
+
+                {/* DESTINATION — primary, prominent input */}
                 <LocationSearchInput
-                  label="Destination"
-                  placeholder="Search destination or mark on map..."
+                  label="To"
+                  placeholder="Where to?"
                   value={destination?.label || ''}
                   onSelect={(lat, lon, label) => {
                     setRouteGeneration((g) => g + 1);
@@ -1660,36 +1631,95 @@ export default function MapScreen() {
                     setIsMarkingDestination((prev) => !prev);
                   }}
                 />
-                <TouchableOpacity
-                  style={styles.button}
-                  onPress={() => {
-                    setRouteCalculationId((prev) => prev + 1);
-                    setRouteGeneration((g) => g + 1);
-                    setAllRoutes([]);
-                    clearStoreState();
-                    setContextPinCoords(null);
-                    handleGetRoute();
-                  }}
-                  disabled={!!loadingState || isAnalyzing}
-                  accessible={true}
-                  accessibilityRole="button"
-                  accessibilityLabel={loadingState || (isAnalyzing ? 'Analyzing weather along route' : 'Compare Routes')}
-                  accessibilityState={{ disabled: !!loadingState || isAnalyzing }}
-                >
-                  {loadingState || isAnalyzing ? (
-                    <View style={styles.buttonLoadingRow}>
-                      <ActivityIndicator size="small" color={COLORS.white} style={{ marginRight: 8 }} />
-                      <Text style={styles.buttonText}>{loadingState || 'Analyzing...'}</Text>
-                    </View>
-                  ) : (
-                    <Text style={styles.buttonText}>Compare Routes</Text>
-                  )}
-                </TouchableOpacity>
+
+                {/* Divider with swap button */}
+                <View style={styles.swapEndpointsRow}>
+                  <Divider style={styles.swapDivider} />
+                  <TouchableOpacity
+                    style={styles.swapEndpointsBtn}
+                    onPress={handleSwapEndpoints}
+                    accessible={true}
+                    accessibilityRole="button"
+                    accessibilityLabel="Swap start and destination"
+                    activeOpacity={0.7}
+                  >
+                    <MaterialCommunityIcons name="swap-vertical" size={20} color={COLORS.electricBlue} />
+                  </TouchableOpacity>
+                </View>
+
+                {/* ORIGIN — collapsed to a quick-row by default, expandable */}
+                {showOriginInput ? (
+                  <LocationSearchInput
+                    label="From"
+                    placeholder="Starting point..."
+                    value={origin?.label || ''}
+                    onSelect={(lat, lon, label) => {
+                      setRouteGeneration((g) => g + 1);
+                      setAllRoutes([]);
+                      clearStoreState();
+                      setOrigin({ lat, lon, label });
+                    }}
+                    onClear={() => {
+                      setRouteGeneration((g) => g + 1);
+                      setAllRoutes([]);
+                      clearStoreState();
+                      setOrigin(null);
+                    }}
+                    showCurrentLocationButton={true}
+                    onCurrentLocationPress={handleUseCurrentLocation}
+                    showMarkOnMapButton={true}
+                    isMarkingOnMap={isMarkingOrigin}
+                    onMarkOnMapPress={() => {
+                      setIsMarkingDestination(false);
+                      setIsMarkingOrigin((prev) => !prev);
+                    }}
+                  />
+                ) : (
+                  <TouchableOpacity
+                    style={styles.originQuickRow}
+                    onPress={() => setShowOriginInput(true)}
+                    activeOpacity={0.75}
+                    accessible={true}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Starting from: ${origin?.label?.split(',')[0] || 'Current Location'}. Tap to change.`}
+                  >
+                    <View style={styles.originQuickDot} />
+                    <Text style={styles.originQuickLabel} numberOfLines={1}>
+                      {origin?.label?.split(',')[0] || 'Current Location'}
+                    </Text>
+                    <Text style={styles.originQuickChange}>Change</Text>
+                  </TouchableOpacity>
+                )}
+
+                {/* Loading indicator replaces the old "Compare Routes" button — auto-trigger handles calculation */}
+                {(loadingState || isAnalyzing) && (
+                  <View style={styles.autoCalcRow}>
+                    <ActivityIndicator size="small" color={COLORS.electricBlue} style={{ marginRight: 8 }} />
+                    <Text style={styles.autoCalcText}>{loadingState || 'Analyzing weather...'}</Text>
+                  </View>
+                )}
               </View>
             </BlurView>
+
+          ) : (
+            /* ── STATE 1: EXPLORE MODE — single Google Maps-style "Where to?" pill ── */
+            <TouchableOpacity
+              style={styles.whereToPill}
+              onPress={() => setIsSearchExpanded(true)}
+              activeOpacity={0.85}
+              accessible={true}
+              accessibilityRole="search"
+              accessibilityLabel="Search for a destination"
+            >
+              <BlurView intensity={90} tint="dark" style={styles.whereToPillBlur}>
+                <MaterialCommunityIcons name="magnify" size={20} color={COLORS.textMuted} style={{ marginRight: 10 }} />
+                <Text style={styles.whereToPillText}>Where to?</Text>
+                <MaterialCommunityIcons name="microphone-outline" size={18} color={COLORS.textMuted} />
+              </BlurView>
+            </TouchableOpacity>
           )}
 
-          {/* Inline Route Error Banner (R-27 UI States) */}
+          {/* Inline Route Error Banner */}
           {routeError && (
             <View style={styles.errorBanner} accessible={true} accessibilityRole="alert">
               <MaterialCommunityIcons name="alert-circle" size={18} color={COLORS.white} style={{ marginRight: 8 }} />
@@ -1705,7 +1735,7 @@ export default function MapScreen() {
             </View>
           )}
 
-          {/* Dynamic Weather Summary Banner (R-25 Contrast, R-04 Vector Icon, R-26 Non-redundant CTA) */}
+          {/* Dynamic Weather Summary Banner */}
           {summary && !routeError && (
             <View
               style={[
@@ -2065,7 +2095,7 @@ export default function MapScreen() {
         />
       )}
 
-      {/* IN-DRIVE REROUTE MODAL (Google Maps style) */}
+      {/* IN-DRIVE REROUTE MODAL (OpenStreetMap navigation style) */}
       <Modal
         visible={isRerouteModalVisible}
         transparent={true}
@@ -2980,5 +3010,103 @@ const styles = StyleSheet.create({
     color: COLORS.navy,
     fontSize: 16,
     fontWeight: '800',
+  },
+
+  // ── Google Maps-style "Where to?" explore pill ──
+  whereToPill: {
+    borderRadius: RADII.xl,
+    overflow: 'hidden',
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  whereToPillBlur: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: COLORS.borderSubtle,
+    borderRadius: RADII.xl,
+  },
+  whereToPillText: {
+    color: COLORS.textMuted,
+    fontSize: 16,
+    fontWeight: '500',
+    flex: 1,
+  },
+
+  // ── Search mode header (back button + title) ──
+  searchModeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  backBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+  searchModeTitle: {
+    color: COLORS.white,
+    fontSize: 15,
+    fontWeight: '700',
+    flex: 1,
+  },
+
+  // ── Origin quick-row (collapsed secondary input) ──
+  originQuickRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    marginTop: 4,
+    borderRadius: RADII.sm,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+  },
+  originQuickDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.electricBlue,
+    marginRight: 12,
+    marginLeft: 4,
+    borderWidth: 2,
+    borderColor: 'rgba(59, 130, 246, 0.3)',
+  },
+  originQuickLabel: {
+    color: COLORS.textSecondary,
+    fontSize: 14,
+    flex: 1,
+  },
+  originQuickChange: {
+    color: COLORS.electricBlue,
+    fontSize: 12,
+    fontWeight: '700',
+    paddingHorizontal: 8,
+  },
+
+  // ── Auto-calculation loading row (replaces "Compare Routes" button) ──
+  autoCalcRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    marginTop: 8,
+    borderRadius: RADII.md,
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.25)',
+  },
+  autoCalcText: {
+    color: COLORS.electricBlue,
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

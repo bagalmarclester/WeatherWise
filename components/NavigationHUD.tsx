@@ -339,7 +339,7 @@ export const NavigationHUD: React.FC<NavigationHUDProps> = ({
           </View>
         </View>
 
-        {/* EXPANDED TRIP ACTIONS DRAWER (Google Maps style) */}
+        {/* EXPANDED TRIP ACTIONS DRAWER (OpenStreetMap navigation style) */}
         {isDrawerOpen && (
           <View style={styles.actionDrawer}>
             <View style={styles.drawerHeader}>
